@@ -54,7 +54,7 @@ router.get('/tables', async (req, res) => {
   }
 });
 
-// Tisch erstellen - WICHTIG: QR-Code zeigt auf UNSEREN Server!
+// Tisch erstellen - WICHTIG: QR-Code zeigt auf BACKEND Server!
 router.post('/tables', async (req, res) => {
   try {
     const { table_number } = req.body;
@@ -88,11 +88,11 @@ router.post('/tables', async (req, res) => {
       is_active: true
     });
     
-    // WICHTIG: QR-Code URL zeigt auf UNSEREN Tracking-Endpoint!
-    const baseUrl = process.env.FRONTEND_URL || 'https://lt-express.de';
-    const qrCodeUrl = `${baseUrl}/api/public/qr/${table.id}`;
+    // WICHTIG: QR-Code URL muss auf BACKEND zeigen!!!
+    const backendUrl = process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com';
+    const qrCodeUrl = `${backendUrl}/api/public/qr/${table.id}`;
     
-    // QR-Code mit unserer URL erstellen
+    // QR-Code mit Backend URL erstellen
     const qrCodeDataUrl = await QRCode.toDataURL(qrCodeUrl, {
       width: 300,
       margin: 2,
@@ -108,7 +108,7 @@ router.post('/tables', async (req, res) => {
     table.qr_code_url = qrCodeUrl;
     await table.save();
     
-    console.log(`QR-Code erstellt für Tisch ${table_number}: ${qrCodeUrl}`);
+    console.log(`✅ QR-Code erstellt für Tisch ${table_number}: ${qrCodeUrl}`);
     
     res.json(table);
   } catch (error) {
@@ -140,7 +140,7 @@ router.delete('/tables/:id', async (req, res) => {
   }
 });
 
-// QR-Code regenerieren - WICHTIG: Behält die gleiche ID!
+// QR-Code regenerieren - WICHTIG: Mit Backend URL!
 router.post('/tables/:id/regenerate-qr', async (req, res) => {
   try {
     const table = await Table.findOne({
@@ -154,9 +154,9 @@ router.post('/tables/:id/regenerate-qr', async (req, res) => {
       return res.status(404).json({ message: 'Tisch nicht gefunden' });
     }
     
-    // WICHTIG: Gleiche URL mit Table ID
-    const baseUrl = process.env.FRONTEND_URL || 'https://lt-express.de';
-    const qrCodeUrl = `${baseUrl}/api/public/qr/${table.id}`;
+    // WICHTIG: Backend URL verwenden!!!
+    const backendUrl = process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com';
+    const qrCodeUrl = `${backendUrl}/api/public/qr/${table.id}`;
     
     const qrCodeDataUrl = await QRCode.toDataURL(qrCodeUrl, {
       width: 300,
@@ -172,7 +172,7 @@ router.post('/tables/:id/regenerate-qr', async (req, res) => {
     table.qr_code_url = qrCodeUrl;
     await table.save();
     
-    console.log(`QR-Code regeneriert für Tisch ${table.table_number}: ${qrCodeUrl}`);
+    console.log(`✅ QR-Code regeneriert für Tisch ${table.table_number}: ${qrCodeUrl}`);
     
     res.json(table);
   } catch (error) {
