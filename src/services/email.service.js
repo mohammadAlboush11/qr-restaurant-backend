@@ -1,203 +1,163 @@
 const nodemailer = require('nodemailer');
 
-// E-Mail Transporter konfigurieren
-let transporter = null;
+class EmailService {
+  constructor() {
+    this.transporter = null;
+    this.isConfigured = false;
+    this.initTransporter();
+  }
 
-const initTransporter = () => {
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.strato.de',
-      port: parseInt(process.env.SMTP_PORT) || 465,
-      secure: true,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      },
-      tls: {
-        rejectUnauthorized: false // Für Strato wichtig
+  initTransporter() {
+    try {
+      // Prüfen ob SMTP konfiguriert ist
+      if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+        console.log('⚠️  E-Mail-Service nicht konfiguriert (SMTP_USER oder SMTP_PASS fehlt)');
+        return;
       }
-    });
-  }
-  return transporter;
-};
 
-// E-Mail bei QR-Code Scan (OHNE Google API)
-const sendScanNotification = async (restaurant, table) => {
-  try {
-    const transport = initTransporter();
-    
-    const mailOptions = {
-      from: `"QR Restaurant System" <${process.env.SMTP_USER}>`,
-      to: restaurant.email,
-      subject: `🔔 QR-Code gescannt - Tisch ${table.table_number}`,
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
-            .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-radius: 0 0 5px 5px; }
-            .info-box { background-color: white; padding: 15px; margin: 15px 0; border-left: 4px solid #4CAF50; }
-            .footer { text-align: center; padding: 20px; color: #666; font-size: 12px; }
-            .button { display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 5px; margin-top: 10px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>🎯 QR-Code Scan Benachrichtigung</h1>
-            </div>
-            
-            <div class="content">
-              <h2>Ein Gast möchte Ihr Restaurant bewerten!</h2>
-              
-              <div class="info-box">
-                <p><strong>📍 Tisch:</strong> ${table.table_number}</p>
-                <p><strong>🕐 Zeit:</strong> ${new Date().toLocaleString('de-DE')}</p>
-                <p><strong>📊 Scan-Nummer:</strong> #${table.scan_count || 1}</p>
+      // Transporter erstellen
+      this.transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.strato.de',
+        port: parseInt(process.env.SMTP_PORT) || 465,
+        secure: true, // true für Port 465
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS
+        },
+        tls: {
+          rejectUnauthorized: false // Für selbst-signierte Zertifikate
+        }
+      });
+
+      // Verbindung testen
+      this.transporter.verify((error, success) => {
+        if (error) {
+          console.error('❌ E-Mail-Service Fehler:', error.message);
+          this.isConfigured = false;
+        } else {
+          console.log('✅ E-Mail-Service bereit');
+          this.isConfigured = true;
+        }
+      });
+    } catch (error) {
+      console.error('❌ E-Mail-Service Initialisierung fehlgeschlagen:', error);
+      this.isConfigured = false;
+    }
+  }
+
+  async sendReviewNotification(restaurant, table, reviewData = {}) {
+    console.log(`📧 Versuche E-Mail zu senden an ${restaurant.email}...`);
+
+    if (!this.isConfigured || !this.transporter) {
+      console.error('❌ E-Mail-Service nicht konfiguriert');
+      return false;
+    }
+
+    try {
+      const mailOptions = {
+        from: `"QR Restaurant System" <${process.env.SMTP_USER}>`,
+        to: restaurant.email,
+        subject: `🔔 QR-Code Scan - Tisch ${table.table_number}`,
+        html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+              .content { background: #f8f9fa; padding: 30px; border: 1px solid #dee2e6; border-radius: 0 0 10px 10px; }
+              .info-box { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+              .table-number { font-size: 24px; font-weight: bold; color: #667eea; }
+              .timestamp { color: #6c757d; font-size: 14px; margin-top: 10px; }
+              .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 2px solid #dee2e6; color: #6c757d; font-size: 12px; }
+              .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>🎯 QR-Code wurde gescannt!</h1>
               </div>
               
-              <p>Ein Gast hat den QR-Code auf <strong>Tisch ${table.table_number}</strong> gescannt und wurde zu Ihrer Google Bewertungsseite weitergeleitet.</p>
-              
-              <p><strong>Was bedeutet das?</strong></p>
-              <ul>
-                <li>Der Gast ist interessiert, eine Bewertung abzugeben</li>
-                <li>In den nächsten Minuten könnte eine neue Google-Bewertung erscheinen</li>
-                <li>Dies ist eine gute Gelegenheit, den Gast persönlich zu bedanken</li>
-              </ul>
-              
-              <div style="background-color: #fff3cd; padding: 10px; border-radius: 5px; margin-top: 20px;">
-                <p style="margin: 0;"><strong>💡 Tipp:</strong> Bedanken Sie sich beim Gast für sein Interesse. Ein persönliches Dankeschön kann zu einer positiveren Bewertung führen!</p>
+              <div class="content">
+                <div class="info-box">
+                  <div class="table-number">Tisch ${table.table_number}</div>
+                  <div class="timestamp">⏰ ${new Date().toLocaleString('de-DE', { 
+                    timeZone: 'Europe/Berlin',
+                    day: '2-digit',
+                    month: '2-digit', 
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })} Uhr</div>
+                </div>
+                
+                <p><strong>Was ist passiert?</strong></p>
+                <p>Ein Gast hat soeben den QR-Code von <strong>Tisch ${table.table_number}</strong> gescannt und wurde zu Ihrer Google Business Seite weitergeleitet.</p>
+                
+                <p><strong>Was bedeutet das?</strong></p>
+                <ul>
+                  <li>Der Gast kann jetzt eine Bewertung abgeben</li>
+                  <li>Die Bewertung erscheint direkt bei Google</li>
+                  <li>Positive Bewertungen verbessern Ihr Ranking</li>
+                </ul>
+                
+                <p><strong>Tipp:</strong> Bedanken Sie sich persönlich beim Gast für die Bewertung!</p>
+                
+                <div style="text-align: center;">
+                  <a href="${restaurant.google_business_url}" class="button">Zu Google Reviews →</a>
+                </div>
+                
+                <div class="footer">
+                  <p>Diese E-Mail wurde automatisch vom QR Restaurant System generiert.</p>
+                  <p>Restaurant: ${restaurant.name}</p>
+                  <p>Gesamte Scans heute: ${table.scan_count || 1}</p>
+                </div>
               </div>
             </div>
-            
-            <div class="footer">
-              <p>Diese Benachrichtigung wurde automatisch generiert.</p>
-              <p>QR Restaurant System - ${new Date().getFullYear()}</p>
-              <p style="color: #999;">Spam-Schutz: Mehrfache Scans innerhalb von 5 Minuten lösen keine weitere E-Mail aus.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    };
+          </body>
+          </html>
+        `
+      };
 
-    const info = await transport.sendMail(mailOptions);
-    console.log('✅ Scan-Benachrichtigung gesendet:', info.messageId);
-    return true;
-  } catch (error) {
-    console.error('❌ E-Mail Fehler:', error);
-    return false;
+      const info = await this.transporter.sendMail(mailOptions);
+      console.log('✅ E-Mail erfolgreich gesendet:', info.messageId);
+      console.log('   An:', restaurant.email);
+      console.log('   Response:', info.response);
+      return true;
+    } catch (error) {
+      console.error('❌ E-Mail Versand fehlgeschlagen:', error);
+      console.error('   Details:', error.message);
+      return false;
+    }
   }
-};
 
-// Willkommens-E-Mail
-const sendWelcomeEmail = async (restaurant, loginCredentials) => {
-  try {
-    const transport = initTransporter();
-    
-    const mailOptions = {
-      from: `"QR Restaurant System" <${process.env.SMTP_USER}>`,
-      to: restaurant.email,
-      subject: '✨ Willkommen beim QR Restaurant System',
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #2196F3; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
-            .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; border-radius: 0 0 5px 5px; }
-            .credentials { background-color: #e3f2fd; padding: 15px; margin: 15px 0; border-radius: 5px; }
-            .footer { text-align: center; padding: 20px; color: #666; font-size: 12px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Willkommen ${restaurant.name}!</h1>
-            </div>
-            
-            <div class="content">
-              <p>Ihr Restaurant wurde erfolgreich im QR Restaurant System registriert.</p>
-              
-              <div class="credentials">
-                <h3>🔐 Ihre Zugangsdaten:</h3>
-                <p><strong>URL:</strong> https://lt-express.de</p>
-                <p><strong>E-Mail:</strong> ${loginCredentials.email}</p>
-                <p><strong>Passwort:</strong> ${loginCredentials.password}</p>
-                <p style="color: red;"><strong>Wichtig:</strong> Bitte ändern Sie Ihr Passwort nach dem ersten Login!</p>
-              </div>
-              
-              <h3>📋 Erste Schritte:</h3>
-              <ol>
-                <li>Melden Sie sich mit Ihren Zugangsdaten an</li>
-                <li>Gehen Sie zu "Einstellungen" und tragen Sie Ihre Google Business URL ein</li>
-                <li>Erstellen Sie unter "Tische & QR-Codes" Ihre Tisch-QR-Codes</li>
-                <li>Drucken Sie die QR-Codes aus und platzieren Sie sie auf den Tischen</li>
-              </ol>
-              
-              <h3>🎯 So funktioniert's:</h3>
-              <ul>
-                <li>Gäste scannen den QR-Code auf ihrem Tisch</li>
-                <li>Sie werden direkt zu Ihrer Google Bewertungsseite weitergeleitet</li>
-                <li>Sie erhalten eine E-Mail-Benachrichtigung bei jedem Scan</li>
-                <li>Verfolgen Sie die Anzahl der Scans in Ihrem Dashboard</li>
-              </ul>
-            </div>
-            
-            <div class="footer">
-              <p>Bei Fragen wenden Sie sich an den Administrator.</p>
-              <p>QR Restaurant System - ${new Date().getFullYear()}</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    };
+  async sendTestEmail(to) {
+    if (!this.isConfigured || !this.transporter) {
+      console.error('❌ E-Mail-Service nicht konfiguriert');
+      return false;
+    }
 
-    const info = await transport.sendMail(mailOptions);
-    console.log('✅ Willkommens-E-Mail gesendet:', info.messageId);
-    return true;
-  } catch (error) {
-    console.error('❌ E-Mail Fehler:', error);
-    return false;
-  }
-};
-
-// Test E-Mail
-const sendTestEmail = async (toEmail) => {
-  try {
-    const transport = initTransporter();
-    
-    const mailOptions = {
-      from: `"QR Restaurant System" <${process.env.SMTP_USER}>`,
-      to: toEmail,
-      subject: '✅ Test E-Mail - QR Restaurant System',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
+    try {
+      const info = await this.transporter.sendMail({
+        from: `"QR Restaurant Test" <${process.env.SMTP_USER}>`,
+        to: to,
+        subject: 'Test E-Mail - QR Restaurant System',
+        html: `
           <h2>Test E-Mail erfolgreich!</h2>
           <p>Wenn Sie diese E-Mail erhalten, funktioniert der E-Mail-Versand korrekt.</p>
-          <p>Zeitstempel: ${new Date().toLocaleString('de-DE')}</p>
-        </div>
-      `
-    };
-
-    const info = await transport.sendMail(mailOptions);
-    console.log('✅ Test-E-Mail gesendet:', info.messageId);
-    return true;
-  } catch (error) {
-    console.error('❌ Test-E-Mail Fehler:', error);
-    throw error;
+          <p>Zeit: ${new Date().toLocaleString('de-DE')}</p>
+        `
+      });
+      console.log('✅ Test-E-Mail gesendet:', info.messageId);
+      return true;
+    } catch (error) {
+      console.error('❌ Test-E-Mail fehlgeschlagen:', error);
+      return false;
+    }
   }
-};
+}
 
-module.exports = {
-  sendScanNotification,
-  sendWelcomeEmail,
-  sendTestEmail,
-  sendReviewNotification: sendScanNotification // Alias für Kompatibilität
-};
+module.exports = new EmailService();

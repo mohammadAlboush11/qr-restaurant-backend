@@ -62,8 +62,20 @@ router.post('/restaurants', async (req, res) => {
       subscription_status: 'inactive'
     });
     
-    // Restaurant-User erstellen
+    // Restaurant-User nur erstellen wenn E-Mail und Passwort vorhanden
     if (user_email && user_password) {
+      // Prüfen ob E-Mail bereits existiert
+      const existingUser = await User.findOne({ where: { email: user_email } });
+      
+      if (existingUser) {
+        console.log(`⚠️ User-Email ${user_email} bereits vergeben, Restaurant wurde trotzdem erstellt`);
+        // Restaurant trotzdem zurückgeben, nur ohne User
+        return res.json({
+          ...restaurant.toJSON(),
+          warning: 'Restaurant erstellt, aber User-E-Mail war bereits vergeben'
+        });
+      }
+      
       await User.create({
         email: user_email,
         password: user_password,
@@ -72,12 +84,14 @@ router.post('/restaurants', async (req, res) => {
         restaurant_id: restaurant.id,
         is_active: true
       });
+      
+      console.log(`✅ Restaurant ${name} mit User ${user_email} erstellt`);
     }
     
     res.json(restaurant);
   } catch (error) {
     console.error('Create Restaurant Error:', error);
-    res.status(500).json({ message: 'Server Fehler' });
+    res.status(500).json({ message: 'Server Fehler: ' + error.message });
   }
 });
 

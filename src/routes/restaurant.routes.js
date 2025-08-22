@@ -54,7 +54,7 @@ router.get('/tables', async (req, res) => {
   }
 });
 
-// Tisch erstellen
+// Tisch erstellen - WICHTIG: QR-Code zeigt auf UNSEREN Server!
 router.post('/tables', async (req, res) => {
   try {
     const { table_number } = req.body;
@@ -81,26 +81,34 @@ router.post('/tables', async (req, res) => {
       return res.status(400).json({ message: 'Google Business URL nicht konfiguriert' });
     }
     
-    // QR-Code URL generieren
-    const qrCodeUrl = `${restaurant.google_business_url}?table=${table_number}`;
+    // Tisch erstellen (ohne QR-Code, bekommt ID)
+    const table = await Table.create({
+      restaurant_id,
+      table_number,
+      is_active: true
+    });
     
-    // QR-Code erstellen
+    // WICHTIG: QR-Code URL zeigt auf UNSEREN Tracking-Endpoint!
+    const baseUrl = process.env.FRONTEND_URL || 'https://lt-express.de';
+    const qrCodeUrl = `${baseUrl}/api/public/qr/${table.id}`;
+    
+    // QR-Code mit unserer URL erstellen
     const qrCodeDataUrl = await QRCode.toDataURL(qrCodeUrl, {
       width: 300,
       margin: 2,
       color: {
         dark: '#000000',
         light: '#FFFFFF'
-      }
+      },
+      errorCorrectionLevel: 'H' // Hohe Fehlerkorrektur
     });
     
-    const table = await Table.create({
-      restaurant_id,
-      table_number,
-      qr_code: qrCodeDataUrl,
-      qr_code_url: qrCodeUrl,
-      is_active: true
-    });
+    // Tisch mit QR-Code aktualisieren
+    table.qr_code = qrCodeDataUrl;
+    table.qr_code_url = qrCodeUrl;
+    await table.save();
+    
+    console.log(`QR-Code erstellt für Tisch ${table_number}: ${qrCodeUrl}`);
     
     res.json(table);
   } catch (error) {
@@ -132,7 +140,7 @@ router.delete('/tables/:id', async (req, res) => {
   }
 });
 
-// QR-Code regenerieren
+// QR-Code regenerieren - WICHTIG: Behält die gleiche ID!
 router.post('/tables/:id/regenerate-qr', async (req, res) => {
   try {
     const table = await Table.findOne({
@@ -146,8 +154,9 @@ router.post('/tables/:id/regenerate-qr', async (req, res) => {
       return res.status(404).json({ message: 'Tisch nicht gefunden' });
     }
     
-    const restaurant = await Restaurant.findByPk(req.user.restaurant_id);
-    const qrCodeUrl = `${restaurant.google_business_url}?table=${table.table_number}`;
+    // WICHTIG: Gleiche URL mit Table ID
+    const baseUrl = process.env.FRONTEND_URL || 'https://lt-express.de';
+    const qrCodeUrl = `${baseUrl}/api/public/qr/${table.id}`;
     
     const qrCodeDataUrl = await QRCode.toDataURL(qrCodeUrl, {
       width: 300,
@@ -155,12 +164,15 @@ router.post('/tables/:id/regenerate-qr', async (req, res) => {
       color: {
         dark: '#000000',
         light: '#FFFFFF'
-      }
+      },
+      errorCorrectionLevel: 'H'
     });
     
     table.qr_code = qrCodeDataUrl;
     table.qr_code_url = qrCodeUrl;
     await table.save();
+    
+    console.log(`QR-Code regeneriert für Tisch ${table.table_number}: ${qrCodeUrl}`);
     
     res.json(table);
   } catch (error) {
