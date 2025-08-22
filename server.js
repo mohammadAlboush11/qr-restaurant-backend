@@ -9,26 +9,19 @@ const adminRoutes = require('./src/routes/admin.routes');
 const restaurantRoutes = require('./src/routes/restaurant.routes');
 const publicRoutes = require('./src/routes/public.routes');
 
+// WICHTIG: Review Monitor Service importieren
+const reviewMonitor = require('./src/services/review-monitor.service');
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // CORS Konfiguration
 const corsOptions = {
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      'https://lt-express.de',
-      'https://www.lt-express.de',
-      'http://localhost:3000'
-    ];
-    // Allow requests with no origin (mobile apps, postman, etc)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(null, true); // Temporär für Tests
-    }
-  },
+  origin: [
+    'https://lt-express.de',
+    'https://www.lt-express.de',
+    'http://localhost:3000'
+  ],
   credentials: true,
   optionsSuccessStatus: 200
 };
@@ -37,8 +30,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
@@ -53,38 +44,39 @@ app.get('/', (req, res) => {
     message: 'QR Restaurant API', 
     version: '1.0.0',
     status: 'running',
-    features: {
-      googleApi: 'NOT_REQUIRED',
-      emailNotifications: 'ACTIVE',
-      qrCodeTracking: 'ACTIVE'
+    services: {
+      database: 'connected',
+      email: process.env.SMTP_USER ? 'configured' : 'not configured',
+      googleAPI: process.env.GOOGLE_PLACES_API_KEY ? 'configured' : 'not configured',
+      reviewMonitor: reviewMonitor.isRunning ? 'running' : 'stopped'
     }
   });
 });
 
 // Error Handler
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err.stack);
+  console.error(err.stack);
   res.status(500).json({ 
     message: 'Etwas ist schief gelaufen!',
     error: process.env.NODE_ENV === 'development' ? err.message : {}
   });
 });
 
-// Server starten
+// Datenbank initialisieren und Server starten
 async function startServer() {
   try {
     console.log('🚀 Starte QR Restaurant System...');
     console.log('================================');
     
-    // Datenbankverbindung
+    // Datenbankverbindung testen
     await sequelize.authenticate();
     console.log('✅ Datenbank verbunden (SQLite)');
     
-    // Tabellen erstellen/aktualisieren
+    // Datenbank-Tabellen erstellen/aktualisieren
     await sequelize.sync({ alter: true });
     console.log('✅ Datenbank-Tabellen synchronisiert');
     
-    // Admin-Account prüfen/erstellen
+    // Super-Admin erstellen falls nicht vorhanden
     const { User } = require('./src/models');
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@lt-express.de';
     const adminPassword = process.env.ADMIN_PASSWORD || 'Admin123!';
@@ -99,35 +91,48 @@ async function startServer() {
         role: 'admin',
         is_active: true
       });
-      console.log('✅ Admin-Account erstellt');
-      console.log(`   E-Mail: ${adminEmail}`);
-      console.log(`   Passwort: ${adminPassword}`);
-      console.log('⚠️  WICHTIG: Passwort nach erstem Login ändern!');
+      console.log(`✅ Super-Admin erstellt: ${adminEmail}`);
     } else {
       console.log('✅ Admin-Account vorhanden');
     }
     
-    // E-Mail-Konfiguration prüfen
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      console.log('✅ E-Mail-Service konfiguriert');
-      console.log(`   SMTP-Host: ${process.env.SMTP_HOST}`);
-      console.log(`   SMTP-User: ${process.env.SMTP_USER}`);
+    // E-Mail Service Status
+    console.log('✅ E-Mail-Service konfiguriert');
+    console.log(`   SMTP-Host: ${process.env.SMTP_HOST || 'nicht konfiguriert'}`);
+    console.log(`   SMTP-User: ${process.env.SMTP_USER || 'nicht konfiguriert'}`);
+    
+    // WICHTIG: Review Monitor starten (nur wenn Google API Key vorhanden)
+    if (process.env.GOOGLE_PLACES_API_KEY) {
+      reviewMonitor.startMonitoring();
+      console.log('✅ Google Review Monitoring gestartet');
+      console.log('   Prüfintervall: 2 Minuten');
+      console.log('   E-Mails nur bei neuen Bewertungen');
     } else {
-      console.log('⚠️  E-Mail-Service nicht konfiguriert!');
-      console.log('   Bitte SMTP_USER und SMTP_PASS in .env setzen');
+      console.log('⚠️  Google Review Monitoring deaktiviert');
+      console.log('   Grund: GOOGLE_PLACES_API_KEY fehlt in .env');
+      console.log('   E-Mails werden mit 5 Min Verzögerung gesendet');
     }
+    
+    console.log('================================');
     
     // Server starten
     app.listen(PORT, '0.0.0.0', () => {
-      console.log('================================');
       console.log('✅ Server läuft!');
       console.log(`   Lokal: http://localhost:${PORT}`);
-      console.log(`   API: https://api.lt-express.de`);
+      console.log(`   API: ${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}`);
       console.log('================================');
-      console.log('📌 Funktionen OHNE Google API:');
-      console.log('   • QR-Code Scans werden getrackt');
-      console.log('   • E-Mail bei jedem Scan (mit 5 Min Spam-Schutz)');
-      console.log('   • Weiterleitung zu Google Reviews');
+      
+      if (process.env.GOOGLE_PLACES_API_KEY) {
+        console.log('📌 Funktionen MIT Google API:');
+        console.log('   • Erkennung neuer Bewertungen');
+        console.log('   • E-Mail nur bei tatsächlicher Bewertung');
+        console.log('   • Autor und Bewertungstext in E-Mail');
+      } else {
+        console.log('📌 Funktionen OHNE Google API:');
+        console.log('   • QR-Code Scans werden getrackt');
+        console.log('   • E-Mail 5 Minuten nach Scan');
+        console.log('   • Weiterleitung zu Google Reviews');
+      }
       console.log('================================');
     });
   } catch (error) {
