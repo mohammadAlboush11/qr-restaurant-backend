@@ -16,13 +16,30 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // CORS Konfiguration
+// CORS Konfiguration ERWEITERT
 const corsOptions = {
-  origin: [
-    'https://lt-express.de',
-    'https://www.lt-express.de',
-    'http://localhost:3000'
-  ],
+  origin: function (origin, callback) {
+    // Erlaubt Requests ohne Origin (z.B. Postman, lokale Tests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'https://lt-express.de',
+      'https://www.lt-express.de',
+      'https://qr-restaurant-managment.onrender.com', // Frontend auf Render
+      'http://localhost:3000',
+      'http://localhost:3001'
+    ];
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked:', origin);
+      callback(null, true); // Temporär alle erlauben für Debug
+    }
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 200
 };
 

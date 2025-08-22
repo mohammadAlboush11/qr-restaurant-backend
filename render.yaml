@@ -1,13 +1,46 @@
 services:
   - type: web
-    name: qr-restaurant-api
+    name: qr-restaurant-backend
     env: node
     buildCommand: npm install
     startCommand: node server.js
     envVars:
+      # Server
       - key: NODE_ENV
         value: production
-      - key: JWT_SECRET
-        generateValue: true
+      - key: PORT
+        value: 5000
+      - key: BACKEND_URL
+        value: https://qr-restaurant-backend.onrender.com
+        
+      # Database
       - key: DATABASE_PATH
         value: ./database.sqlite
+        
+      # JWT (automatisch generiert)
+      - key: JWT_SECRET
+        generateValue: true
+        
+      # Frontend
+      - key: FRONTEND_URL
+        value: http://lt-express.de
+        
+      # Admin Account
+      - key: ADMIN_EMAIL
+        value: admin@lt-express.de
+      - key: ADMIN_PASSWORD
+        sync: false # Manuell im Dashboard setzen für Sicherheit
+        
+      # SMTP (Strato)
+      - key: SMTP_HOST
+        value: smtp.strato.de
+      - key: SMTP_PORT
+        value: 465
+      - key: SMTP_USER
+        value: info@cleanovio.de
+      - key: SMTP_PASS
+        sync: false # WICHTIG: Manuell im Dashboard setzen!
+        
+      # Google Places API (Optional)
+      - key: AIzaSyCz7bB9ZCkwfMCLDt4CSOnVebRd4_u60pc
+        sync: false # Manuell im Dashboard setzen wenn vorhanden
