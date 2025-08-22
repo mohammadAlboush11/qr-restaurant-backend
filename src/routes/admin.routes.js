@@ -46,7 +46,7 @@ router.get('/restaurants', async (req, res) => {
   }
 });
 
-// Restaurant erstellen
+// Restaurant erstellen - MIT BESSERER FEHLERBEHANDLUNG
 router.post('/restaurants', async (req, res) => {
   try {
     const { name, email, phone, address, google_business_url, user_email, user_password } = req.body;
@@ -62,36 +62,61 @@ router.post('/restaurants', async (req, res) => {
       subscription_status: 'inactive'
     });
     
+    let userCreated = false;
+    let userError = null;
+    
     // Restaurant-User nur erstellen wenn E-Mail und Passwort vorhanden
     if (user_email && user_password) {
-      // Prüfen ob E-Mail bereits existiert
-      const existingUser = await User.findOne({ where: { email: user_email } });
-      
-      if (existingUser) {
-        console.log(`⚠️ User-Email ${user_email} bereits vergeben, Restaurant wurde trotzdem erstellt`);
-        // Restaurant trotzdem zurückgeben, nur ohne User
-        return res.json({
-          ...restaurant.toJSON(),
-          warning: 'Restaurant erstellt, aber User-E-Mail war bereits vergeben'
-        });
+      try {
+        // Prüfen ob E-Mail bereits existiert
+        const existingUser = await User.findOne({ where: { email: user_email } });
+        
+        if (!existingUser) {
+          await User.create({
+            email: user_email,
+            password: user_password,
+            name: name,
+            role: 'restaurant',
+            restaurant_id: restaurant.id,
+            is_active: true
+          });
+          userCreated = true;
+          console.log(`✅ Restaurant ${name} mit User ${user_email} erstellt`);
+        } else {
+          userError = `Login-E-Mail ${user_email} ist bereits vergeben. Restaurant wurde trotzdem erstellt.`;
+          console.log(`⚠️ User-Email ${user_email} bereits vergeben, Restaurant wurde trotzdem erstellt`);
+        }
+      } catch (userCreateError) {
+        userError = `Fehler beim Erstellen des Login-Users: ${userCreateError.message}`;
+        console.error('User Create Error:', userCreateError);
       }
-      
-      await User.create({
-        email: user_email,
-        password: user_password,
-        name: name,
-        role: 'restaurant',
-        restaurant_id: restaurant.id,
-        is_active: true
-      });
-      
-      console.log(`✅ Restaurant ${name} mit User ${user_email} erstellt`);
     }
     
-    res.json(restaurant);
+    // Response mit Warnung falls User nicht erstellt wurde
+    const response = {
+      ...restaurant.toJSON(),
+      userCreated
+    };
+    
+    if (userError) {
+      response.warning = userError;
+    }
+    
+    res.json(response);
   } catch (error) {
     console.error('Create Restaurant Error:', error);
-    res.status(500).json({ message: 'Server Fehler: ' + error.message });
+    
+    // Spezifische Fehlermeldungen
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ 
+        message: 'Ein Restaurant mit dieser E-Mail existiert bereits' 
+      });
+    }
+    
+    res.status(500).json({ 
+      message: 'Fehler beim Erstellen des Restaurants',
+      error: error.message 
+    });
   }
 });
 
@@ -124,6 +149,8 @@ router.patch('/restaurants/:id/toggle-status', async (req, res) => {
         { is_active: true },
         { where: { restaurant_id: restaurant.id } }
       );
+      
+      // Tische NICHT automatisch aktivieren (müssen manuell aktiviert werden)
     }
     
     await restaurant.save();
