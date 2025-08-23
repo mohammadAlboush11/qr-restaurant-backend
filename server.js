@@ -8,17 +8,18 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 
-// Services
+// Services (lokal)
 const emailService = require("./src/services/email.service");
 const keepAlive = safeRequire("./src/services/keep-alive.service");
 const reviewMonitor = safeRequire("./src/services/review-monitor.service");
 
-// Routen
+// Routen (Index-Dateien der Ordner)
 const adminRoutes = safeRequire("./src/routes/admin");
 const publicRoutes = safeRequire("./src/routes/public");
 const restaurantRoutes = safeRequire("./src/routes/restaurant");
 
 // ———————————————————————————————————————————————————————————————————————
+// Helpers
 function safeRequire(p) {
   try {
     const mod = require(p);
@@ -33,26 +34,28 @@ function safeRequire(p) {
 
 function logHeader(title) {
   console.log("========================================");
-  if (title) console.log(title);
+  console.log(title);
   console.log("========================================");
 }
 
 // ———————————————————————————————————————————————————————————————————————
+// App-Grundkonfiguration
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Statische Dateien (falls benötigt)
 const staticDir = path.join(__dirname, "public");
 app.use("/public", express.static(staticDir));
 
-app.get("/health", async (req, res) => {
-  const verified = await emailService.verify();
+// Health-/Status-Endpunkte
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
     env: process.env.NODE_ENV || "development",
     node: process.version,
-    email: { ...emailService.getStatus(), verified },
+    email: emailService.getStatus(),
     time: new Date().toISOString(),
   });
 });
@@ -61,12 +64,13 @@ app.get("/", (req, res) => {
   res.send("QR Restaurant Backend läuft.");
 });
 
-// Mount Routen
+// Routen mounten – nur wenn vorhanden
 if (adminRoutes) app.use("/api/admin", adminRoutes);
 if (publicRoutes) app.use("/api/public", publicRoutes);
 if (restaurantRoutes) app.use("/api/restaurant", restaurantRoutes);
 
 // ———————————————————————————————————————————————————————————————————————
+// Start-Sequenz
 async function initializeServer() {
   logHeader("🚀 QR Restaurant Backend - Initialisierung");
 
@@ -75,10 +79,13 @@ async function initializeServer() {
   console.log("🔧 Node Version:", process.version);
   logHeader("");
 
-  // ❌ KEIN Aufruf von emailService.initializeTransporter()
-  // Der Service initialisiert sich selbst; optional nur verify:
+  // E-Mail Service: KEIN initializeTransporter() – die Methode heißt initTransporter()
+  // und wird bereits im Konstruktor ausgeführt. Optional: verify()
   const emailOk = await emailService.verify();
-  console.log("📧 E-Mail Service Status:", { ...emailService.getStatus(), verified: emailOk });
+  console.log("📧 E-Mail Service Status:", {
+    ...emailService.getStatus(),
+    verified: emailOk,
+  });
 
   // Optionale Hintergrund-Jobs
   if (keepAlive?.start) {
@@ -97,6 +104,7 @@ async function initializeServer() {
   });
 }
 
+// ———————————————————————————————————————————————————————————————————————
 initializeServer().catch((err) => {
   console.error("❌ Server-Initialisierung fehlgeschlagen:", err);
   process.exit(1);
