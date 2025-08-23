@@ -1,195 +1,157 @@
 /**
- * Restaurant Routes Index
+ * Restaurant Routes - KORRIGIERTE VERSION
  * Speichern als: backend/src/routes/restaurant/index.js
  */
 
 const router = require('express').Router();
-const { 
-    verifyToken, 
-    requireRestaurantOwner,
-    requireRestaurantAccess 
-} = require('../../middleware/auth.middleware');
-const { 
-    checkActiveSubscription,
-    checkFeatureAccess,
-    checkUsageLimit 
-} = require('../../middleware/subscription.middleware');
+const authMiddleware = require('../../middleware/auth.middleware');
+const restaurantMiddleware = require('../../middleware/restaurant.middleware');
+const validationMiddleware = require('../../middleware/validation.middleware');
 
-// Import controllers
+// Controllers
+const authController = require('../../controllers/restaurant/auth.controller');
 const restaurantController = require('../../controllers/restaurant/restaurant.controller');
 const tableController = require('../../controllers/restaurant/table.controller');
 const qrcodeController = require('../../controllers/restaurant/qrcode.controller');
 
-// Import validation middleware
-const {
-    validateCreateTable,
-    validateUUID,
-    validatePagination,
-    validateDateRange,
-    validateQRCodeStyle
-} = require('../../middleware/validation.middleware');
-
-// Apply authentication to all routes
-router.use(verifyToken, requireRestaurantOwner);
-
-// Restaurant management (owner's restaurant)
-router.get('/:restaurantId/dashboard', 
-    requireRestaurantAccess, 
-    checkActiveSubscription,
-    restaurantController.getDashboard
+// ============================
+// Auth Routes (Öffentlich)
+// ============================
+router.post('/auth/login', 
+  validationMiddleware.validateLogin(),
+  authController.login
 );
 
-router.get('/:restaurantId/details', 
-    requireRestaurantAccess,
-    restaurantController.getRestaurantDetails
+router.post('/auth/validate', 
+  authMiddleware.authenticate,
+  authController.validateToken
 );
 
-router.put('/:restaurantId', 
-    requireRestaurantAccess,
-    restaurantController.updateRestaurant
+router.post('/auth/logout',
+  authMiddleware.authenticate,
+  authController.logout
 );
 
-router.get('/:restaurantId/analytics', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    validateDateRange,
-    restaurantController.getAnalytics
+router.post('/auth/forgot-password',
+  authController.requestPasswordReset
 );
 
-router.get('/:restaurantId/analytics/export', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    checkFeatureAccess('export_data'),
-    restaurantController.exportAnalytics
+router.post('/auth/reset-password',
+  authController.resetPassword
 );
 
-router.get('/:restaurantId/subscription', 
-    requireRestaurantAccess,
-    restaurantController.getSubscriptionInfo
+// ============================
+// Restaurant Routes (Authentifiziert)
+// ============================
+
+// Dashboard
+router.get('/dashboard',
+  authMiddleware.requireRestaurantOwner,
+  restaurantController.getDashboard
 );
 
-// Table management
-router.get('/:restaurantId/tables', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    tableController.getAllTables
+// Profil
+router.get('/profile',
+  authMiddleware.requireRestaurantOwner,
+  restaurantController.getProfile
 );
 
-router.get('/:restaurantId/tables/:tableId', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.getTable
+router.put('/profile',
+  authMiddleware.requireRestaurantOwner,
+  restaurantController.updateProfile
 );
 
-router.post('/:restaurantId/tables', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    checkUsageLimit('tables'),
-    validateCreateTable,
-    tableController.createTable
+// Passwort ändern
+router.post('/change-password',
+  authMiddleware.requireRestaurantOwner,
+  validationMiddleware.validatePasswordChange(),
+  restaurantController.changePassword
 );
 
-router.put('/:restaurantId/tables/:tableId', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.updateTable
+// Statistiken
+router.get('/statistics',
+  authMiddleware.requireRestaurantOwner,
+  restaurantController.getStatistics
 );
 
-router.delete('/:restaurantId/tables/:tableId', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.deleteTable
+// Google Places ID
+router.post('/google-place',
+  authMiddleware.requireRestaurantOwner,
+  restaurantController.updateGooglePlaceId
 );
 
-router.post('/:restaurantId/tables/bulk-create', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    tableController.bulkCreateTables
+// ============================
+// Table Management Routes
+// ============================
+router.get('/tables',
+  authMiddleware.requireRestaurantOwner,
+  tableController.getAllTables
 );
 
-router.patch('/:restaurantId/tables/:tableId/status', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.toggleTableStatus
+router.get('/tables/:id',
+  authMiddleware.requireRestaurantOwner,
+  validationMiddleware.validateIdParam(),
+  tableController.getTable
 );
 
-router.get('/:restaurantId/tables/:tableId/analytics', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.getTableAnalytics
+router.post('/tables',
+  authMiddleware.requireRestaurantOwner,
+  validationMiddleware.validateTableCreation(),
+  tableController.createTable
 );
 
-router.post('/:restaurantId/tables/:tableId/reset-stats', 
-    requireRestaurantAccess,
-    validateUUID('tableId'),
-    tableController.resetTableStats
+router.put('/tables/:id',
+  authMiddleware.requireRestaurantOwner,
+  validationMiddleware.validateIdParam(),
+  tableController.updateTable
 );
 
-router.post('/:restaurantId/tables/bulk-update', 
-    requireRestaurantAccess,
-    tableController.bulkUpdateTables
+router.delete('/tables/:id',
+  authMiddleware.requireRestaurantOwner,
+  validationMiddleware.validateIdParam(),
+  tableController.deleteTable
 );
 
-// QR Code management
-router.get('/:restaurantId/qrcodes', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    qrcodeController.getAllQRCodes
+// Batch-Operationen
+router.post('/tables/batch',
+  authMiddleware.requireRestaurantOwner,
+  tableController.createMultipleTables
 );
 
-router.get('/:restaurantId/qrcodes/statistics', 
-    requireRestaurantAccess,
-    qrcodeController.getQRCodeStatistics
+router.delete('/tables/batch',
+  authMiddleware.requireRestaurantOwner,
+  tableController.deleteMultipleTables
 );
 
-router.get('/:restaurantId/qrcodes/:qrCodeId', 
-    requireRestaurantAccess,
-    validateUUID('qrCodeId'),
-    qrcodeController.getQRCode
+// ============================
+// QR Code Routes
+// ============================
+router.post('/qrcode/:tableId/generate',
+  authMiddleware.requireRestaurantOwner,
+  qrcodeController.generateQRCode
 );
 
-router.post('/:restaurantId/tables/:tableId/qrcode', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    validateUUID('tableId'),
-    qrcodeController.generateQRCode
+router.post('/qrcode/generate-all',
+  authMiddleware.requireRestaurantOwner,
+  qrcodeController.generateAllQRCodes
 );
 
-router.post('/:restaurantId/qrcodes/:qrCodeId/regenerate', 
-    requireRestaurantAccess,
-    validateUUID('qrCodeId'),
-    qrcodeController.regenerateQRCode
+router.get('/qrcode/:tableId/download',
+  authMiddleware.requireRestaurantOwner,
+  qrcodeController.downloadQRCode
 );
 
-router.put('/:restaurantId/qrcodes/:qrCodeId/style', 
-    requireRestaurantAccess,
-    validateUUID('qrCodeId'),
-    checkFeatureAccess('custom_qr_design'),
-    validateQRCodeStyle,
-    qrcodeController.updateQRCodeStyle
+router.get('/qrcode/download-all',
+  authMiddleware.requireRestaurantOwner,
+  qrcodeController.downloadAllQRCodesPDF
 );
 
-router.get('/:restaurantId/qrcodes/:qrCodeId/download', 
-    requireRestaurantAccess,
-    validateUUID('qrCodeId'),
-    qrcodeController.downloadQRCode
+router.get('/qrcode/:tableId/preview',
+  authMiddleware.requireRestaurantOwner,
+  qrcodeController.previewQRCode
 );
 
-router.get('/:restaurantId/qrcodes/download/all', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    qrcodeController.downloadAllQRCodes
-);
-
-router.post('/:restaurantId/qrcodes/preview', 
-    requireRestaurantAccess,
-    qrcodeController.getQRCodePreview
-);
-
-router.post('/:restaurantId/qrcodes/bulk-generate', 
-    requireRestaurantAccess,
-    checkActiveSubscription,
-    qrcodeController.bulkGenerateQRCodes
-);
-
+// ============================
+// Export
+// ============================
 module.exports = router;
