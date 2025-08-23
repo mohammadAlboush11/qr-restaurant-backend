@@ -1,71 +1,62 @@
-let nodemailer;
-try {
-  nodemailer = require('nodemailer');
-  console.log('✅ nodemailer Modul geladen');
-} catch (error) {
-  console.error('❌ nodemailer nicht installiert! Installiere mit: npm install nodemailer');
-  nodemailer = null;
-}
+/**
+ * Email Service - KORRIGIERTE VERSION
+ * Speichern als: backend/src/services/email.service.js
+ */
+
+const nodemailer = require('nodemailer');
 
 class EmailService {
   constructor() {
     this.transporter = null;
     this.isConfigured = false;
-    // Sofort initialisieren, nicht verzögert
-    this.initTransporter();
+    this.initializeTransporter();
   }
 
-  initTransporter() {
+  async initializeTransporter() {
     try {
-      // Check ob nodemailer verfügbar
-      if (!nodemailer) {
-        console.error('❌ nodemailer Modul nicht verfügbar!');
-        this.isConfigured = false;
-        return;
-      }
-
-      if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        console.log('⚠️  E-Mail-Service nicht konfiguriert (SMTP_USER oder SMTP_PASS fehlt)');
+      // Prüfe ob alle erforderlichen Umgebungsvariablen vorhanden sind
+      const requiredVars = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_PORT'];
+      const missingVars = requiredVars.filter(varName => !process.env[varName]);
+      
+      if (missingVars.length > 0) {
+        console.error('❌ E-Mail-Service nicht konfiguriert. Fehlende Variablen:', missingVars.join(', '));
         this.isConfigured = false;
         return;
       }
 
       console.log('📧 Initialisiere E-Mail-Service...');
+      console.log('   SMTP_HOST:', process.env.SMTP_HOST);
+      console.log('   SMTP_PORT:', process.env.SMTP_PORT);
       console.log('   SMTP_USER:', process.env.SMTP_USER);
-      console.log('   SMTP_HOST:', process.env.SMTP_HOST || 'smtp.strato.de');
-      console.log('   SMTP_PORT:', process.env.SMTP_PORT || 465);
 
-      this.transporter = nodemailer.createTransporter({
-        host: process.env.SMTP_HOST || 'smtp.strato.de',
-        port: parseInt(process.env.SMTP_PORT) || 465,
-        secure: true,
+      // WICHTIG: createTransport statt createTransporter!
+      this.transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: parseInt(process.env.SMTP_PORT),
+        secure: process.env.SMTP_PORT == 465, // true für Port 465
         auth: {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS
         },
         tls: {
-          rejectUnauthorized: false,
+          rejectUnauthorized: false, // für selbst-signierte Zertifikate
           minVersion: 'TLSv1.2'
         },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000
+        connectionTimeout: 30000, // 30 Sekunden
+        greetingTimeout: 30000,
+        socketTimeout: 30000
       });
 
-      // Async Verification ohne await
-      this.transporter.verify((error, success) => {
-        if (error) {
-          console.error('❌ E-Mail-Service Verifikation fehlgeschlagen:');
-          console.error('   Fehler:', error.message);
-          console.error('   Code:', error.code);
-          this.isConfigured = false;
-        } else {
-          console.log('✅ E-Mail-Service bereit und verifiziert!');
-          this.isConfigured = true;
-        }
-      });
-
-      // Trotzdem als konfiguriert markieren für erste Versuche
-      this.isConfigured = true;
+      // Verifiziere die Verbindung
+      try {
+        await this.transporter.verify();
+        console.log('✅ E-Mail-Service erfolgreich initialisiert und verifiziert!');
+        this.isConfigured = true;
+      } catch (verifyError) {
+        console.error('⚠️ E-Mail-Service Verifikation fehlgeschlagen:', verifyError.message);
+        console.log('   Versuche trotzdem E-Mails zu senden...');
+        this.isConfigured = true; // Trotzdem als konfiguriert markieren
+      }
       
     } catch (error) {
       console.error('❌ E-Mail-Service Initialisierung fehlgeschlagen:', error.message);
@@ -73,29 +64,20 @@ class EmailService {
     }
   }
 
-  // NEUE METHODE: NUR für echte Bewertungen!
   async sendNewReviewNotification(restaurant, table, reviewData) {
     console.log(`🌟 Sende E-Mail für NEUE BEWERTUNG an ${restaurant.email}`);
 
-    if (!nodemailer) {
-      console.error('❌ nodemailer nicht installiert!');
-      return false;
-    }
-
-    if (!this.transporter) {
-      console.error('❌ E-Mail Transporter nicht initialisiert');
-      // Versuche nochmal zu initialisieren
-      this.initTransporter();
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    if (!this.isConfigured || !this.transporter) {
+      console.error('❌ E-Mail Service nicht bereit');
+      await this.initializeTransporter(); // Versuche erneut zu initialisieren
       
-      if (!this.transporter) {
-        console.error('❌ E-Mail Service konnte nicht initialisiert werden');
+      if (!this.isConfigured) {
         return false;
       }
     }
 
     try {
-      const ratingStars = reviewData.rating ? '⭐'.repeat(reviewData.rating) : '';
+      const ratingStars = reviewData.rating ? '⭐'.repeat(Math.min(reviewData.rating, 5)) : '';
       
       const mailOptions = {
         from: `"QR Restaurant System" <${process.env.SMTP_USER}>`,
@@ -107,44 +89,138 @@ class EmailService {
           <head>
             <meta charset="UTF-8">
             <style>
-              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-              .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-              .content { background: #fff; padding: 30px; border: 1px solid #e0e0e0; border-radius: 0 0 10px 10px; }
-              .review-box { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea; }
-              .rating { font-size: 28px; color: #ffc107; margin: 10px 0; }
-              .author { font-weight: bold; color: #495057; font-size: 18px; margin-bottom: 10px; }
-              .review-text { color: #6c757d; font-style: italic; line-height: 1.5; margin: 15px 0; }
-              .table-info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin-top: 20px; border: 1px solid #90caf9; }
-              .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
-              .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0; color: #6c757d; font-size: 12px; }
+              body { 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                line-height: 1.6; 
+                color: #333; 
+                margin: 0;
+                padding: 0;
+              }
+              .container { 
+                max-width: 600px; 
+                margin: 0 auto; 
+                background: #f5f5f5;
+              }
+              .header { 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                color: white; 
+                padding: 40px 30px; 
+                text-align: center; 
+              }
+              .header h1 {
+                margin: 0;
+                font-size: 28px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+              }
+              .header p {
+                margin: 10px 0 0 0;
+                font-size: 18px;
+                opacity: 0.95;
+              }
+              .content { 
+                background: #fff; 
+                padding: 30px; 
+              }
+              .review-box { 
+                background: #f8f9fa; 
+                padding: 25px; 
+                border-radius: 10px; 
+                margin: 20px 0; 
+                border-left: 5px solid #667eea;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+              }
+              .rating { 
+                font-size: 32px; 
+                color: #ffc107; 
+                margin: 10px 0;
+                text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+              }
+              .author { 
+                font-weight: bold; 
+                color: #495057; 
+                font-size: 20px; 
+                margin-bottom: 10px;
+              }
+              .review-text { 
+                color: #6c757d; 
+                font-style: italic; 
+                line-height: 1.8; 
+                margin: 15px 0;
+                padding: 15px;
+                background: white;
+                border-radius: 5px;
+                border: 1px solid #e9ecef;
+              }
+              .table-info { 
+                background: #e3f2fd; 
+                padding: 15px 20px; 
+                border-radius: 8px; 
+                margin-top: 20px; 
+                border: 1px solid #90caf9;
+              }
+              .table-info strong {
+                color: #1976d2;
+                font-size: 16px;
+              }
+              .table-info small {
+                color: #64b5f6;
+                display: block;
+                margin-top: 5px;
+              }
+              .timestamp {
+                color: #999; 
+                font-size: 14px; 
+                margin-top: 15px;
+                padding-top: 15px;
+                border-top: 1px solid #e9ecef;
+              }
+              .footer { 
+                text-align: center; 
+                margin-top: 30px; 
+                padding: 20px;
+                background: #f8f9fa;
+                color: #6c757d; 
+                font-size: 13px;
+              }
+              .footer strong {
+                color: #495057;
+                font-size: 16px;
+              }
             </style>
           </head>
           <body>
             <div class="container">
               <div class="header">
-                <h1 style="margin: 0;">🎉 Neue Google Bewertung!</h1>
-                <p style="margin: 10px 0 0 0; font-size: 18px;">${restaurant.name} wurde bewertet</p>
+                <h1>🎉 Neue Google Bewertung erhalten!</h1>
+                <p>${restaurant.name}</p>
               </div>
               <div class="content">
                 <div class="review-box">
-                  ${reviewData.rating ? `<div class="rating">${'⭐'.repeat(reviewData.rating)}</div>` : ''}
-                  ${reviewData.author ? `<div class="author">Von: ${reviewData.author}</div>` : ''}
-                  ${reviewData.text ? `<div class="review-text">"${reviewData.text}"</div>` : ''}
-                  <div style="color: #999; font-size: 14px; margin-top: 10px;">
-                    ${new Date().toLocaleString('de-DE')}
+                  ${reviewData.rating ? `<div class="rating">${'⭐'.repeat(Math.min(reviewData.rating, 5))}</div>` : ''}
+                  ${reviewData.author ? `<div class="author">Bewertet von: ${reviewData.author}</div>` : ''}
+                  ${reviewData.text ? `<div class="review-text">"${reviewData.text}"</div>` : '<div class="review-text">Keine Textbewertung hinterlassen</div>'}
+                  <div class="timestamp">
+                    📅 Erhalten am: ${new Date().toLocaleString('de-DE', {
+                      weekday: 'long',
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
                   </div>
                 </div>
                 ${table ? `
                 <div class="table-info">
-                  <strong>📍 Wahrscheinlich von Tisch ${table.table_number}</strong><br>
-                  <small style="color: #666;">Der Gast hat kürzlich den QR-Code dieses Tisches gescannt</small>
+                  <strong>🍽️ Wahrscheinlich von Tisch ${table.table_number}</strong>
+                  <small>Der Gast hat kürzlich den QR-Code dieses Tisches gescannt</small>
                 </div>
                 ` : ''}
-                <div class="footer">
-                  <p><strong>${restaurant.name}</strong></p>
-                  <p>QR Restaurant System</p>
-                </div>
+              </div>
+              <div class="footer">
+                <strong>${restaurant.name}</strong><br>
+                QR Restaurant Review System<br>
+                <small>Diese E-Mail wurde automatisch generiert</small>
               </div>
             </div>
           </body>
@@ -156,60 +232,71 @@ class EmailService {
       const info = await this.transporter.sendMail(mailOptions);
       console.log('✅ E-Mail erfolgreich gesendet!');
       console.log('   Message ID:', info.messageId);
+      console.log('   Response:', info.response);
       return true;
+      
     } catch (error) {
       console.error('❌ E-Mail Versand fehlgeschlagen:', error.message);
-      console.error('   Code:', error.code);
-      console.error('   Response:', error.response);
+      console.error('   Details:', {
+        code: error.code,
+        command: error.command,
+        response: error.response,
+        responseCode: error.responseCode
+      });
       return false;
     }
   }
 
-  // Test-E-Mail
   async sendTestEmail(to) {
-    console.log(`📧 Test-E-Mail an ${to}`);
+    console.log(`📧 Sende Test-E-Mail an ${to}`);
     
-    if (!nodemailer) {
-      console.error('❌ nodemailer nicht installiert!');
-      return false;
-    }
-
-    if (!this.transporter) {
-      console.error('❌ E-Mail Transporter nicht initialisiert');
-      this.initTransporter();
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    if (!this.isConfigured || !this.transporter) {
+      console.error('❌ E-Mail Service nicht bereit');
+      await this.initializeTransporter();
       
-      if (!this.transporter) {
-        console.error('❌ E-Mail Service konnte nicht initialisiert werden');
+      if (!this.isConfigured) {
         return false;
       }
     }
 
     try {
-      console.log('📨 Sende Test-E-Mail...');
       const info = await this.transporter.sendMail({
         from: `"QR Restaurant Test" <${process.env.SMTP_USER}>`,
         to: to,
         subject: 'Test E-Mail - QR Restaurant System',
-        text: 'Test E-Mail erfolgreich!',
+        text: 'Test E-Mail erfolgreich empfangen!',
         html: `
-          <h2>Test E-Mail erfolgreich!</h2>
-          <p>Der E-Mail-Versand funktioniert korrekt.</p>
-          <p>Zeit: ${new Date().toLocaleString('de-DE')}</p>
+          <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #667eea;">✅ Test E-Mail erfolgreich!</h2>
+            <p>Der E-Mail-Versand funktioniert korrekt.</p>
+            <p><strong>Zeitstempel:</strong> ${new Date().toLocaleString('de-DE')}</p>
+            <hr style="margin: 20px 0; border: none; border-top: 1px solid #e0e0e0;">
+            <p style="color: #666; font-size: 12px;">
+              Diese Test-E-Mail wurde vom QR Restaurant System gesendet.
+            </p>
+          </div>
         `
       });
-      console.log('✅ Test-E-Mail gesendet!');
+      
+      console.log('✅ Test-E-Mail erfolgreich gesendet!');
       console.log('   Message ID:', info.messageId);
       return true;
+      
     } catch (error) {
-      console.error('❌ Test-E-Mail fehlgeschlagen:');
-      console.error('   Fehler:', error.message);
-      console.error('   Code:', error.code);
-      console.error('   Command:', error.command);
-      console.error('   Response:', error.response);
+      console.error('❌ Test-E-Mail fehlgeschlagen:', error.message);
       return false;
     }
   }
+
+  // Methode zum erneuten Initialisieren (falls Verbindung verloren geht)
+  async reconnect() {
+    console.log('🔄 Versuche E-Mail-Service neu zu verbinden...');
+    this.transporter = null;
+    this.isConfigured = false;
+    await this.initializeTransporter();
+    return this.isConfigured;
+  }
 }
 
+// Singleton-Pattern
 module.exports = new EmailService();

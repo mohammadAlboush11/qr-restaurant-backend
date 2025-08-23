@@ -1,260 +1,248 @@
+/**
+ * Review Monitor Service - OPTIMIERTE VERSION
+ * Speichern als: backend/src/services/review-monitor.service.js
+ */
+
 const axios = require('axios');
-const { Op } = require('sequelize');
-const { Restaurant, Table, ReviewNotification } = require('../models');
+const { Restaurant, ReviewNotification } = require('../models');
 const emailService = require('./email.service');
 
 class ReviewMonitorService {
   constructor() {
-    this.apiKey = process.env.GOOGLE_PLACES_API_KEY;
-    this.scanTracking = new Map(); 
-    this.checkInterval = 60 * 1000; 
-    this.isRunning = false;
-    this.lastReviewIds = new Map(); 
-    this.lastReviewCounts = new Map(); // WICHTIG: Speichert initiale Counts
+    this.monitoringInterval = null;
+    this.checkInterval = 30000; // 30 Sekunden statt 60
+    this.isMonitoring = false;
+    this.lastCheckTime = new Date();
+    this.checkCount = 0;
   }
 
-  trackScan(restaurantId, tableId) {
-    const now = Date.now();
-    const key = `${restaurantId}_${tableId}_${now}`;
-    
-    this.scanTracking.set(key, {
-      restaurantId,
-      tableId,
-      timestamp: now,
-      checked: false
-    });
-    
-    console.log(`📱 Scan getrackt für Restaurant ${restaurantId}, Tisch ${tableId}`);
-    console.log(`   KEINE E-Mail gesendet - warte auf echte Bewertung`);
-    
-    // Nach 2, 5 und 10 Minuten prüfen
-    [2, 5, 10].forEach(minutes => {
-      setTimeout(() => {
-        this.checkForNewReview(restaurantId, tableId);
-      }, minutes * 60 * 1000);
-    });
-    
-    // Nach 30 Minuten entfernen
-    setTimeout(() => {
-      this.scanTracking.delete(key);
-    }, 30 * 60 * 1000);
-  }
-
-  async checkForNewReview(restaurantId, tableId = null) {
-    if (!this.apiKey) {
-      console.log('⚠️ Google Places API Key nicht konfiguriert');
-      return false;
+  async startMonitoring() {
+    if (!process.env.GOOGLE_PLACES_API_KEY) {
+      console.log('⚠️ Review Monitoring deaktiviert - Google API Key fehlt');
+      return;
     }
 
+    if (this.isMonitoring) {
+      console.log('ℹ️ Review Monitoring läuft bereits');
+      return;
+    }
+
+    console.log('🚀 Starte Review Monitoring Service...');
+    console.log(`   ⏱️ Check-Intervall: ${this.checkInterval / 1000} Sekunden`);
+    
+    this.isMonitoring = true;
+    
+    // Erste Prüfung sofort nach 5 Sekunden
+    setTimeout(() => this.checkAllRestaurants(), 5000);
+    
+    // Dann regelmäßig alle 30 Sekunden
+    this.monitoringInterval = setInterval(() => {
+      this.checkAllRestaurants();
+    }, this.checkInterval);
+  }
+
+  async stopMonitoring() {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = null;
+      this.isMonitoring = false;
+      console.log('⏹️ Review Monitoring gestoppt');
+    }
+  }
+
+  async checkAllRestaurants() {
     try {
-      const restaurant = await Restaurant.findByPk(restaurantId);
+      this.checkCount++;
+      console.log(`\n🔍 Review Check #${this.checkCount} - ${new Date().toLocaleTimeString('de-DE')}`);
       
-      if (!restaurant || !restaurant.google_place_id) {
-        console.log(`⚠️ Restaurant ${restaurantId} hat keine Google Place ID`);
-        return false;
+      const restaurants = await Restaurant.findAll({
+        where: { 
+          is_active: true,
+          google_place_id: { 
+            [require('sequelize').Op.ne]: null 
+          }
+        }
+      });
+
+      if (restaurants.length === 0) {
+        console.log('   Keine aktiven Restaurants mit Google Place ID gefunden');
+        return;
       }
 
-      console.log(`🔍 Prüfe auf neue Bewertungen für ${restaurant.name}...`);
+      console.log(`   Prüfe ${restaurants.length} Restaurant(s) auf neue Reviews...`);
+      
+      for (const restaurant of restaurants) {
+        await this.checkRestaurantReviews(restaurant);
+        // Kleine Pause zwischen Restaurants (1 Sekunde)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      this.lastCheckTime = new Date();
+      
+    } catch (error) {
+      console.error('❌ Fehler beim Review-Check:', error.message);
+    }
+  }
 
-      // Google Places API
+  async checkRestaurantReviews(restaurant) {
+    try {
+      console.log(`   📍 Prüfe: ${restaurant.name}...`);
+      
+      // Google Places API Details abrufen
       const response = await axios.get(
         'https://maps.googleapis.com/maps/api/place/details/json',
         {
           params: {
             place_id: restaurant.google_place_id,
-            fields: 'reviews,user_ratings_total,rating',
-            key: this.apiKey,
+            fields: 'reviews,rating,user_ratings_total',
+            key: process.env.GOOGLE_PLACES_API_KEY,
             language: 'de'
-          }
+          },
+          timeout: 10000 // 10 Sekunden Timeout
         }
       );
 
       if (response.data.status !== 'OK') {
-        console.error('❌ Google API Error:', response.data.status);
-        return false;
+        console.log(`      ⚠️ Google API Status: ${response.data.status}`);
+        return;
       }
 
-      const result = response.data.result;
-      const currentCount = result.user_ratings_total || 0;
-      const reviews = result.reviews || [];
+      const placeDetails = response.data.result;
+      const currentReviewCount = placeDetails.user_ratings_total || 0;
+      const lastKnownCount = restaurant.last_review_count || 0;
 
-      // WICHTIG: Hole gespeicherten Count aus Memory, nicht aus DB!
-      const lastKnownCount = this.lastReviewCounts.get(restaurantId) || restaurant.last_review_count || 0;
+      console.log(`      Aktuelle Reviews: ${currentReviewCount} | Letzte: ${lastKnownCount}`);
 
-      console.log(`   Aktuelle Bewertungen: ${currentCount}`);
-      console.log(`   Letzte bekannte Anzahl: ${lastKnownCount}`);
-
-      // Prüfe ob WIRKLICH neue Bewertung
-      if (currentCount > lastKnownCount) {
-        console.log(`🌟 NEUE BEWERTUNG GEFUNDEN für ${restaurant.name}!`);
-        console.log(`   Anzahl erhöht von ${lastKnownCount} auf ${currentCount}`);
+      // Prüfe auf neue Reviews
+      if (currentReviewCount > lastKnownCount) {
+        const newReviewsCount = currentReviewCount - lastKnownCount;
+        console.log(`      🌟 ${newReviewsCount} NEUE BEWERTUNG(EN) GEFUNDEN!`);
         
-        // Neueste Review
-        const latestReview = reviews[0];
+        // Hole die neuesten Reviews
+        const latestReviews = placeDetails.reviews || [];
         
-        // Prüfe ob Review schon verarbeitet
-        const lastProcessedId = this.lastReviewIds.get(restaurantId);
-        const currentReviewId = this.generateReviewId(latestReview);
-        
-        if (currentReviewId !== lastProcessedId) {
-          // Tisch ermitteln
-          let table = null;
-          if (tableId) {
-            table = await Table.findByPk(tableId);
-          }
+        // Verarbeite neue Reviews (normalerweise nur die neueste)
+        for (let i = 0; i < Math.min(newReviewsCount, latestReviews.length); i++) {
+          const review = latestReviews[i];
           
-          // E-Mail senden
-          console.log(`📧 Sende E-Mail für NEUE BEWERTUNG an ${restaurant.email}`);
-          
-          const emailSent = await emailService.sendNewReviewNotification(
-            restaurant,
-            table,
-            {
-              author: latestReview?.author_name || 'Anonym',
-              rating: latestReview?.rating,
-              text: latestReview?.text,
-              time: latestReview?.time ? new Date(latestReview.time * 1000) : new Date()
+          // Prüfe ob diese Review schon verarbeitet wurde
+          const existingNotification = await ReviewNotification.findOne({
+            where: {
+              restaurant_id: restaurant.id,
+              review_author: review.author_name,
+              review_time: new Date(review.time * 1000)
             }
-          );
-          
-          if (emailSent) {
-            console.log(`✅ E-Mail erfolgreich gesendet!`);
-            
-            // Review in DB speichern
-            await ReviewNotification.create({
-              restaurant_id: restaurantId,
-              table_id: tableId,
-              review_author: latestReview?.author_name,
-              review_text: latestReview?.text,
-              review_rating: latestReview?.rating,
-              review_time: latestReview?.time ? new Date(latestReview.time * 1000) : new Date(),
-              notification_sent: true
-            });
-            
-            // IDs speichern
-            this.lastReviewIds.set(restaurantId, currentReviewId);
+          });
+
+          if (!existingNotification) {
+            await this.processNewReview(restaurant, review);
           }
         }
-        
-        // WICHTIG: Count in Memory UND DB speichern
-        this.lastReviewCounts.set(restaurantId, currentCount);
-        restaurant.last_review_count = currentCount;
-        restaurant.last_review_check = new Date();
-        await restaurant.save();
-        
-        return true;
-      } else {
-        console.log('   Keine neuen Bewertungen gefunden');
-        // Trotzdem Memory aktualisieren
-        this.lastReviewCounts.set(restaurantId, currentCount);
-      }
-      
-      return false;
-    } catch (error) {
-      console.error('❌ Review Check Error:', error.message);
-      return false;
-    }
-  }
 
-  generateReviewId(review) {
-    if (!review) return null;
-    return `${review.author_name}_${review.time}_${review.rating}`;
-  }
-
-  startMonitoring() {
-    if (this.isRunning) return;
-    
-    if (!this.apiKey) {
-      console.log('⚠️ Review Monitoring NICHT gestartet - Google API Key fehlt!');
-      return;
-    }
-    
-    this.isRunning = true;
-    console.log('✅ Review Monitoring gestartet');
-    console.log(`   Prüfintervall: ${this.checkInterval / 1000} Sekunden`);
-    console.log('   E-Mails werden NUR bei neuen Bewertungen gesendet');
-    
-    // Initial Baseline
-    this.initializeBaseline();
-    
-    // Periodische Prüfung
-    this.intervalId = setInterval(async () => {
-      try {
-        const restaurants = await Restaurant.findAll({
-          where: { 
-            is_active: true,
-            google_place_id: { [Op.ne]: null }
-          }
+        // Update Restaurant Review Count
+        await restaurant.update({
+          last_review_count: currentReviewCount,
+          last_review_check: new Date(),
+          current_rating: placeDetails.rating
         });
         
-        console.log(`🔍 Prüfe ${restaurants.length} Restaurants auf neue Reviews...`);
-        
-        for (const restaurant of restaurants) {
-          await this.checkForNewReview(restaurant.id);
-        }
-      } catch (error) {
-        console.error('Monitoring Error:', error);
+      } else if (currentReviewCount < lastKnownCount) {
+        // Reviews wurden gelöscht
+        console.log(`      ⚠️ Reviews wurden gelöscht (${lastKnownCount} → ${currentReviewCount})`);
+        await restaurant.update({
+          last_review_count: currentReviewCount,
+          last_review_check: new Date()
+        });
+      } else {
+        console.log(`      ✓ Keine neuen Reviews`);
+        await restaurant.update({
+          last_review_check: new Date()
+        });
       }
-    }, this.checkInterval);
+      
+    } catch (error) {
+      console.error(`   ❌ Fehler bei ${restaurant.name}:`, error.message);
+      
+      if (error.response?.status === 429) {
+        console.log('   ⚠️ API Rate Limit erreicht - pausiere für 60 Sekunden');
+        await new Promise(resolve => setTimeout(resolve, 60000));
+      }
+    }
   }
 
-  async initializeBaseline() {
+  async processNewReview(restaurant, reviewData) {
     try {
-      const restaurants = await Restaurant.findAll({
-        where: { 
-          is_active: true,
-          google_place_id: { [Op.ne]: null }
-        }
+      console.log(`      📧 Verarbeite Review von: ${reviewData.author_name}`);
+      
+      // Erstelle Review-Benachrichtigung in DB
+      const notification = await ReviewNotification.create({
+        restaurant_id: restaurant.id,
+        review_author: reviewData.author_name,
+        review_rating: reviewData.rating,
+        review_text: reviewData.text,
+        review_time: new Date(reviewData.time * 1000),
+        notification_sent: false
       });
 
-      console.log(`📊 Initialisiere Baseline für ${restaurants.length} Restaurants...`);
-
-      for (const restaurant of restaurants) {
-        try {
-          const response = await axios.get(
-            'https://maps.googleapis.com/maps/api/place/details/json',
-            {
-              params: {
-                place_id: restaurant.google_place_id,
-                fields: 'reviews,user_ratings_total',
-                key: this.apiKey,
-                language: 'de'
-              }
-            }
-          );
-
-          if (response.data.status === 'OK') {
-            const result = response.data.result;
-            const currentCount = result.user_ratings_total || 0;
-            
-            // WICHTIG: In Memory UND DB speichern
-            this.lastReviewCounts.set(restaurant.id, currentCount);
-            restaurant.last_review_count = currentCount;
-            restaurant.last_review_check = new Date();
-            await restaurant.save();
-            
-            if (result.reviews && result.reviews.length > 0) {
-              const reviewId = this.generateReviewId(result.reviews[0]);
-              this.lastReviewIds.set(restaurant.id, reviewId);
-            }
-            
-            console.log(`   ✅ ${restaurant.name}: ${currentCount} Bewertungen (Baseline gesetzt)`);
-          }
-        } catch (error) {
-          console.error(`   ❌ Fehler bei ${restaurant.name}:`, error.message);
+      // Sende E-Mail-Benachrichtigung
+      const emailSent = await emailService.sendNewReviewNotification(
+        restaurant,
+        null, // Kein spezifischer Tisch
+        {
+          author: reviewData.author_name,
+          rating: reviewData.rating,
+          text: reviewData.text,
+          time: new Date(reviewData.time * 1000)
         }
+      );
+
+      if (emailSent) {
+        await notification.update({
+          notification_sent: true,
+          notification_sent_at: new Date()
+        });
+        console.log(`      ✅ E-Mail-Benachrichtigung gesendet!`);
+      } else {
+        console.log(`      ⚠️ E-Mail konnte nicht gesendet werden`);
       }
+      
     } catch (error) {
-      console.error('Baseline Error:', error);
+      console.error('      ❌ Fehler beim Verarbeiten der Review:', error.message);
     }
   }
 
-  stopMonitoring() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.isRunning = false;
-      console.log('⏹️ Review Monitoring gestoppt');
+  // Methode für manuellen Review-Check (z.B. nach QR-Scan)
+  async checkForNewReviewAfterScan(restaurant, delayMinutes = 2) {
+    if (!restaurant.google_place_id) {
+      return;
     }
+
+    console.log(`⏰ Plane Review-Check für ${restaurant.name} in ${delayMinutes} Minuten`);
+    
+    // Mehrere Checks mit unterschiedlichen Verzögerungen
+    const checkDelays = [
+      delayMinutes * 60 * 1000,           // z.B. 2 Minuten
+      (delayMinutes + 1) * 60 * 1000,     // 3 Minuten
+      (delayMinutes + 3) * 60 * 1000      // 5 Minuten
+    ];
+
+    checkDelays.forEach((delay, index) => {
+      setTimeout(async () => {
+        console.log(`   🔍 Review-Check ${index + 1}/3 für ${restaurant.name}`);
+        await this.checkRestaurantReviews(restaurant);
+      }, delay);
+    });
+  }
+
+  // Status-Methode für Monitoring
+  getStatus() {
+    return {
+      isMonitoring: this.isMonitoring,
+      checkInterval: this.checkInterval,
+      lastCheckTime: this.lastCheckTime,
+      checkCount: this.checkCount,
+      apiKeyConfigured: !!process.env.GOOGLE_PLACES_API_KEY
+    };
   }
 }
 

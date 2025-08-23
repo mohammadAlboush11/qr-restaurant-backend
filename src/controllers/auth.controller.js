@@ -1,249 +1,370 @@
 /**
- * Auth Controller
- * Speichern als: backend/src/controllers/auth.controller.js
+ * Restaurant Auth Controller - KORRIGIERTE VERSION
+ * Speichern als: backend/src/controllers/restaurant/auth.controller.js
  */
 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { User, Restaurant, ActivityLog } = require('../models');
+const { User, Restaurant, Table } = require('../../models');
 const { Op } = require('sequelize');
 
-// Generate JWT Token
-const generateToken = (user, type = 'access') => {
-    const secret = type === 'access' 
-        ? process.env.JWT_SECRET 
-        : process.env.JWT_REFRESH_SECRET;
-    
-    const expiresIn = type === 'access' 
-        ? process.env.JWT_EXPIRE || '7d'
-        : process.env.JWT_REFRESH_EXPIRE || '30d';
-
-    return jwt.sign(
-        { 
-            id: user.id, 
-            email: user.email, 
-            role: user.role 
-        },
-        secret,
-        { expiresIn }
-    );
-};
-
-// Login
-const login = async (req, res) => {
+class AuthController {
+  // Login
+  async login(req, res) {
     try {
-        const { email, password } = req.body;
+      const { email, password } = req.body;
 
-        console.log('Login attempt for:', email);
-
-        // Validate input
-        if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email und Passwort sind erforderlich'
-            });
-        }
-
-        // Find user
-        const user = await User.findOne({
-            where: { 
-                email: email.toLowerCase(),
-                is_active: true
-            },
-            include: [{
-                model: Restaurant,
-                as: 'restaurants',
-                required: false
-            }]
+      // Validierung
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'E-Mail und Passwort sind erforderlich'
         });
+      }
 
-        if (!user) {
-            console.log('User not found:', email);
-            return res.status(401).json({
-                success: false,
-                message: 'Ungültige Anmeldedaten'
-            });
-        }
+      console.log(`🔐 Login-Versuch für: ${email}`);
 
-        // Check password
-        const isValidPassword = await bcrypt.compare(password, user.password);
-        
-        if (!isValidPassword) {
-            console.log('Invalid password for:', email);
-            
-            // Increment login attempts
-            await user.increment('login_attempts');
-            
-            return res.status(401).json({
-                success: false,
-                message: 'Ungültige Anmeldedaten'
-            });
-        }
+      // Benutzer mit Restaurant-Daten laden
+      const user = await User.findOne({
+        where: { 
+          email: email.toLowerCase().trim(),
+          is_active: true
+        },
+        include: [{
+          model: Restaurant,
+          as: 'restaurant',
+          include: [{
+            model: Table,
+            as: 'tables'
+          }]
+        }]
+      });
 
-        // Reset login attempts
-        await user.update({
-            login_attempts: 0,
-            last_login_at: new Date(),
-            last_login_ip: req.ip
+      if (!user) {
+        console.log(`❌ Login fehlgeschlagen: Benutzer nicht gefunden - ${email}`);
+        return res.status(401).json({
+          success: false,
+          message: 'Ungültige E-Mail oder Passwort'
         });
+      }
 
-        // Generate tokens
-        const accessToken = generateToken(user, 'access');
-        const refreshToken = generateToken(user, 'refresh');
-
-        // Log activity
-        await ActivityLog.create({
-            user_id: user.id,
-            action: 'login_success',
-            category: 'auth',
-            severity: 'info',
-            description: 'Erfolgreiche Anmeldung',
-            metadata: {
-                ip: req.ip,
-                user_agent: req.get('user-agent')
-            }
+      // Passwort prüfen
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      
+      if (!isValidPassword) {
+        console.log(`❌ Login fehlgeschlagen: Falsches Passwort - ${email}`);
+        return res.status(401).json({
+          success: false,
+          message: 'Ungültige E-Mail oder Passwort'
         });
+      }
 
-        // Prepare user data
-        const userData = {
-            id: user.id,
+      // Prüfe ob Restaurant aktiv ist (nur für Restaurant-Rolle)
+      if (user.role === 'restaurant' && user.restaurant && !user.restaurant.is_active) {
+        console.log(`⚠️ Login verweigert: Restaurant deaktiviert - ${email}`);
+        return res.status(403).json({
+          success: false,
+          message: 'Ihr Restaurant-Account ist deaktiviert. Bitte kontaktieren Sie den Support.'
+        });
+      }
+
+      // JWT Token generieren
+      const token = jwt.sign(
+        {
+          userId: user.id,
+          email: user.email,
+          role: user.role,
+          restaurant_id: user.restaurant_id
+        },
+        process.env.JWT_SECRET || 'your-secret-key-change-this',
+        {
+          expiresIn: '7d'
+        }
+      );
+
+      // Update last login
+      await user.update({
+        last_login: new Date()
+      });
+
+      console.log(`✅ Login erfolgreich: ${email} (${user.role})`);
+
+      // Response vorbereiten
+      const userData = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        restaurant_id: user.restaurant_id
+      };
+
+      // Restaurant-Daten hinzufügen wenn vorhanden
+      if (user.restaurant) {
+        userData.restaurant = {
+          id: user.restaurant.id,
+          name: user.restaurant.name,
+          slug: user.restaurant.slug,
+          is_active: user.restaurant.is_active,
+          subscription_status: user.restaurant.subscription_status,
+          subscription_end_date: user.restaurant.subscription_end_date,
+          google_place_id: user.restaurant.google_place_id,
+          google_review_url: user.restaurant.google_review_url,
+          tables_count: user.restaurant.tables ? user.restaurant.tables.length : 0
+        };
+      }
+
+      res.json({
+        success: true,
+        message: 'Login erfolgreich',
+        token,
+        user: userData
+      });
+
+    } catch (error) {
+      console.error('❌ Login Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Login fehlgeschlagen',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+  // Token validieren / Refresh
+  async validateToken(req, res) {
+    try {
+      // User ist bereits durch Middleware authentifiziert
+      const user = await User.findByPk(req.user.id, {
+        attributes: { exclude: ['password'] },
+        include: [{
+          model: Restaurant,
+          as: 'restaurant',
+          attributes: [
+            'id', 'name', 'slug', 'is_active', 
+            'subscription_status', 'subscription_end_date',
+            'google_place_id', 'google_review_url'
+          ]
+        }]
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer nicht gefunden'
+        });
+      }
+
+      // Neuer Token wenn gewünscht
+      let newToken = null;
+      if (req.query.refresh === 'true') {
+        newToken = jwt.sign(
+          {
+            userId: user.id,
             email: user.email,
             role: user.role,
-            first_name: user.first_name,
-            last_name: user.last_name,
-            is_email_verified: user.is_email_verified,
-            restaurants: user.restaurants
+            restaurant_id: user.restaurant_id
+          },
+          process.env.JWT_SECRET || 'your-secret-key-change-this',
+          {
+            expiresIn: '7d'
+          }
+        );
+      }
+
+      const userData = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        restaurant_id: user.restaurant_id
+      };
+
+      if (user.restaurant) {
+        userData.restaurant = {
+          id: user.restaurant.id,
+          name: user.restaurant.name,
+          slug: user.restaurant.slug,
+          is_active: user.restaurant.is_active,
+          subscription_status: user.restaurant.subscription_status,
+          subscription_end_date: user.restaurant.subscription_end_date,
+          google_place_id: user.restaurant.google_place_id,
+          google_review_url: user.restaurant.google_review_url
         };
+      }
 
-        console.log('Login successful for:', email);
-
-        res.json({
-            success: true,
-            message: 'Erfolgreich angemeldet',
-            data: {
-                user: userData,
-                access_token: accessToken,
-                refresh_token: refreshToken
-            }
-        });
+      res.json({
+        success: true,
+        valid: true,
+        user: userData,
+        ...(newToken && { token: newToken })
+      });
 
     } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Interner Serverfehler'
-        });
+      console.error('Token Validierung Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Token-Validierung fehlgeschlagen'
+      });
     }
-};
+  }
 
-// Get current user
-const getCurrentUser = async (req, res) => {
+  // Passwort zurücksetzen anfordern
+  async requestPasswordReset(req, res) {
     try {
-        const user = await User.findByPk(req.user.id, {
-            attributes: { exclude: ['password'] },
-            include: [{
-                model: Restaurant,
-                as: 'restaurants',
-                required: false
-            }]
-        });
+      const { email } = req.body;
 
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'Benutzer nicht gefunden'
-            });
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: 'E-Mail Adresse erforderlich'
+        });
+      }
+
+      const user = await User.findOne({
+        where: { 
+          email: email.toLowerCase().trim() 
         }
+      });
 
-        res.json({
-            success: true,
-            data: user
+      if (!user) {
+        // Aus Sicherheitsgründen immer erfolgreiche Antwort
+        return res.json({
+          success: true,
+          message: 'Wenn die E-Mail-Adresse existiert, wurde eine Anleitung zum Zurücksetzen gesendet.'
         });
+      }
+
+      // Reset-Token generieren
+      const resetToken = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email,
+          type: 'password_reset'
+        },
+        process.env.JWT_SECRET || 'your-secret-key-change-this',
+        { 
+          expiresIn: '1h' 
+        }
+      );
+
+      // Token in DB speichern
+      await user.update({
+        reset_token: resetToken,
+        reset_token_expires: new Date(Date.now() + 3600000) // 1 Stunde
+      });
+
+      // E-Mail senden (wenn Service konfiguriert)
+      if (emailService.isConfigured) {
+        // E-Mail-Template würde hier gesendet
+        console.log(`📧 Password-Reset E-Mail würde an ${email} gesendet`);
+      }
+
+      res.json({
+        success: true,
+        message: 'Wenn die E-Mail-Adresse existiert, wurde eine Anleitung zum Zurücksetzen gesendet.'
+      });
 
     } catch (error) {
-        console.error('Get user error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Interner Serverfehler'
-        });
+      console.error('Password Reset Request Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Zurücksetzen des Passworts'
+      });
     }
-};
+  }
 
-// Refresh token
-const refreshToken = async (req, res) => {
+  // Passwort zurücksetzen
+  async resetPassword(req, res) {
     try {
-        const { refresh_token } = req.body;
+      const { token, newPassword } = req.body;
 
-        if (!refresh_token) {
-            return res.status(400).json({
-                success: false,
-                message: 'Refresh Token erforderlich'
-            });
-        }
-
-        // Verify refresh token
-        const decoded = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET);
-        
-        // Find user
-        const user = await User.findByPk(decoded.id);
-        
-        if (!user || !user.is_active) {
-            return res.status(401).json({
-                success: false,
-                message: 'Ungültiger Refresh Token'
-            });
-        }
-
-        // Generate new access token
-        const newAccessToken = generateToken(user, 'access');
-
-        res.json({
-            success: true,
-            data: {
-                access_token: newAccessToken
-            }
+      if (!token || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Token und neues Passwort erforderlich'
         });
+      }
+
+      // Token verifizieren
+      let decoded;
+      try {
+        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültiger oder abgelaufener Token'
+        });
+      }
+
+      if (decoded.type !== 'password_reset') {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültiger Token-Typ'
+        });
+      }
+
+      // Benutzer finden
+      const user = await User.findOne({
+        where: {
+          id: decoded.userId,
+          reset_token: token,
+          reset_token_expires: {
+            [Op.gt]: new Date()
+          }
+        }
+      });
+
+      if (!user) {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültiger oder abgelaufener Token'
+        });
+      }
+
+      // Neues Passwort hashen und speichern
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      
+      await user.update({
+        password: hashedPassword,
+        reset_token: null,
+        reset_token_expires: null
+      });
+
+      console.log(`✅ Passwort zurückgesetzt für: ${user.email}`);
+
+      res.json({
+        success: true,
+        message: 'Passwort erfolgreich zurückgesetzt'
+      });
 
     } catch (error) {
-        console.error('Refresh token error:', error);
-        res.status(401).json({
-            success: false,
-            message: 'Ungültiger Refresh Token'
-        });
+      console.error('Password Reset Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Zurücksetzen des Passworts'
+      });
     }
-};
+  }
 
-// Logout
-const logout = async (req, res) => {
+  // Logout (optional - hauptsächlich für Logging)
+  async logout(req, res) {
     try {
-        // Log activity if user is authenticated
-        if (req.user) {
-            await ActivityLog.create({
-                user_id: req.user.id,
-                action: 'logout',
-                category: 'auth',
-                severity: 'info',
-                description: 'Benutzer abgemeldet'
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Erfolgreich abgemeldet'
-        });
-
+      console.log(`👋 Logout: ${req.user.email}`);
+      
+      // Hier könnte man Token blacklisten wenn nötig
+      
+      res.json({
+        success: true,
+        message: 'Erfolgreich abgemeldet'
+      });
     } catch (error) {
-        console.error('Logout error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Interner Serverfehler'
-        });
+      console.error('Logout Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Logout fehlgeschlagen'
+      });
     }
-};
+  }
+}
 
-module.exports = {
-    login,
-    getCurrentUser,
-    refreshToken,
-    logout
-};
+module.exports = new AuthController();

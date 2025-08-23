@@ -1,265 +1,260 @@
-﻿const express = require('express');
+﻿/**
+ * QR Restaurant Backend Server - VOLLSTÄNDIG KORRIGIERT
+ * Speichern als: backend/server.js
+ */
+
+require('dotenv').config();
+const express = require('express');
 const cors = require('cors');
 const path = require('path');
-require('dotenv').config();
 
-const { sequelize } = require('./src/models');
-const authRoutes = require('./src/routes/auth.routes');
-const adminRoutes = require('./src/routes/admin.routes');
-const restaurantRoutes = require('./src/routes/restaurant.routes');
-const publicRoutes = require('./src/routes/public.routes');
-
-// WICHTIG: Review Monitor Service importieren
+// Services
 const reviewMonitor = require('./src/services/review-monitor.service');
+const keepAliveService = require('./src/services/keep-alive.service');
+const emailService = require('./src/services/email.service');
+
+// Database
+const { sequelize, User, Restaurant } = require('./src/models');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS Konfiguration
+// CORS Configuration
 const corsOptions = {
   origin: function (origin, callback) {
-    // Erlaubt Requests ohne Origin (z.B. Postman, lokale Tests)
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://lt-express.de',
+      'https://lt-express.de',
+      process.env.FRONTEND_URL
+    ].filter(Boolean);
+
+    // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) return callback(null, true);
     
-    const allowedOrigins = [
-      'http://lt-express.de',
-      'http://www.lt-express.de',
-      'https://qr-restaurant-managment.onrender.com',
-      'https://qr-restaurant-backend.onrender.com',
-      'http://localhost:3000',
-      'http://localhost:3001'
-    ];
-    
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.log('CORS blocked:', origin);
-      callback(null, true); // Temporär alle erlauben für Debug
+      console.log('⚠️ CORS blocked origin:', origin);
+      callback(null, true); // In Production trotzdem erlauben für Flexibilität
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-auth-token'],
+  exposedHeaders: ['X-New-Token'] // Für Token-Refresh
 };
 
-// Middleware
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Request Logging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Health Check Endpoint (für Keep-Alive und Monitoring)
+app.get('/api/health', (req, res) => {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
+    services: {
+      database: sequelize.authenticate().then(() => true).catch(() => false),
+      email: emailService.isConfigured,
+      reviewMonitor: reviewMonitor.getStatus().isMonitoring,
+      keepAlive: keepAliveService.getStatus().isRunning
+    }
+  };
+  
+  res.status(200).json(health);
+});
+
+// Keep-Alive Status Endpoint
+app.get('/api/keep-alive/status', (req, res) => {
+  res.json(keepAliveService.getStatus());
+});
 
 // Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/restaurant', restaurantRoutes);
-app.use('/api/public', publicRoutes);
+app.use('/api/restaurant', require('./src/routes/restaurant'));
+app.use('/api/admin', require('./src/routes/admin'));
+app.use('/api/public', require('./src/routes/public'));
 
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'QR Restaurant API', 
-    version: '1.0.0',
-    status: 'running',
-    timestamp: new Date(),
-    services: {
-      database: 'connected',
-      email: process.env.SMTP_USER ? 'configured' : 'not configured',
-      googleAPI: process.env.GOOGLE_PLACES_API_KEY ? 'configured' : 'not configured',
-      reviewMonitor: reviewMonitor.isRunning ? 'running' : 'stopped',
-      backendUrl: process.env.BACKEND_URL || 'not set',
-      environment: process.env.NODE_ENV || 'development'
-    }
+// Static files (QR codes, etc.)
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// 404 Handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Endpoint nicht gefunden',
+    path: req.path
   });
 });
 
-// API Status endpoint
-app.get('/api', (req, res) => {
-  res.json({ 
-    message: 'API is running',
-    version: '1.0.0',
-    endpoints: {
-      auth: '/api/auth',
-      admin: '/api/admin',
-      restaurant: '/api/restaurant',
-      public: '/api/public'
-    }
-  });
-});
-
-// Error Handler
+// Global Error Handler
 app.use((err, req, res, next) => {
-  console.error('Error:', err.stack);
-  res.status(500).json({ 
-    message: 'Etwas ist schief gelaufen!',
-    error: process.env.NODE_ENV === 'development' ? err.message : {}
+  console.error('❌ Unbehandelter Fehler:', err);
+  
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Interner Serverfehler',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
-// Datenbank initialisieren und Server starten
-async function startServer() {
+// Graceful Shutdown
+process.on('SIGTERM', async () => {
+  console.log('📛 SIGTERM Signal erhalten. Fahre Server herunter...');
+  
+  // Stoppe Services
+  reviewMonitor.stopMonitoring();
+  keepAliveService.stop();
+  
+  // Schließe Datenbankverbindung
+  await sequelize.close();
+  
+  process.exit(0);
+});
+
+// Server Initialization
+async function initializeServer() {
   try {
-    console.log('🚀 Starte QR Restaurant System...');
-    console.log('================================');
-    
-    // Environment Check
-    console.log('📋 Environment Check:');
-    console.log(`   NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`   PORT: ${PORT}`);
-    console.log(`   BACKEND_URL: ${process.env.BACKEND_URL || 'nicht gesetzt'}`);
-    console.log('================================');
-    
+    console.log('========================================');
+    console.log('🚀 QR Restaurant Backend - Initialisierung');
+    console.log('========================================');
+    console.log(`📅 ${new Date().toLocaleString('de-DE')}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🔧 Node Version: ${process.version}`);
+    console.log('========================================');
+
     // Datenbankverbindung testen
+    console.log('📊 Teste Datenbankverbindung...');
     await sequelize.authenticate();
-    console.log('✅ Datenbank verbunden (SQLite)');
-    
-    // Datenbank-Tabellen erstellen/aktualisieren
-    await sequelize.sync({ alter: true });
-    console.log('✅ Datenbank-Tabellen synchronisiert');
-    
-    // Super-Admin erstellen falls nicht vorhanden
-    const { User } = require('./src/models');
+    console.log('✅ Datenbankverbindung erfolgreich!');
+
+    // Datenbank synchronisieren
+    console.log('🔄 Synchronisiere Datenbank-Schema...');
+    await sequelize.sync({ alter: false }); // alter: true nur in Dev!
+    console.log('✅ Datenbank-Schema aktuell');
+
+    // Admin-Account prüfen/erstellen
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@lt-express.de';
-    const adminPassword = process.env.ADMIN_PASSWORD || 'Admin123!';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'Admin123!@#';
     
-    const adminExists = await User.findOne({ where: { role: 'admin' } });
+    const adminExists = await User.findOne({ 
+      where: { 
+        role: 'admin',
+        email: adminEmail 
+      } 
+    });
     
     if (!adminExists) {
+      const bcrypt = require('bcryptjs');
+      const hashedPassword = await bcrypt.hash(adminPassword, 10);
+      
       await User.create({
         email: adminEmail,
-        password: adminPassword,
+        password: hashedPassword,
         name: 'Super Admin',
         role: 'admin',
         is_active: true
       });
-      console.log(`✅ Super-Admin erstellt: ${adminEmail}`);
-      console.log('⚠️  WICHTIG: Bitte ändern Sie das Admin-Passwort nach dem ersten Login!');
+      
+      console.log(`✅ Admin-Account erstellt: ${adminEmail}`);
+      console.log('⚠️  WICHTIG: Ändern Sie das Admin-Passwort nach dem ersten Login!');
     } else {
-      console.log('✅ Admin-Account vorhanden');
+      console.log(`✅ Admin-Account vorhanden: ${adminEmail}`);
     }
+
+    console.log('========================================');
     
-    // E-Mail Service Status
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      console.log('✅ E-Mail-Service konfiguriert');
-      console.log(`   SMTP-Host: ${process.env.SMTP_HOST || 'smtp.strato.de'}`);
+    // E-Mail Service initialisieren
+    console.log('📧 E-Mail Service Status:');
+    await emailService.initializeTransporter();
+    
+    if (emailService.isConfigured) {
+      console.log('✅ E-Mail-Service bereit');
+      console.log(`   SMTP-Host: ${process.env.SMTP_HOST}`);
       console.log(`   SMTP-User: ${process.env.SMTP_USER}`);
+      
+      // Optional: Test-E-Mail senden
+      if (process.env.SEND_TEST_EMAIL === 'true') {
+        const testResult = await emailService.sendTestEmail(process.env.ADMIN_EMAIL);
+        if (testResult) {
+          console.log('✅ Test-E-Mail erfolgreich gesendet');
+        }
+      }
     } else {
       console.log('⚠️  E-Mail-Service NICHT konfiguriert');
-      console.log('   SMTP_USER oder SMTP_PASS fehlt in .env');
+      console.log('   Prüfen Sie SMTP_HOST, SMTP_USER, SMTP_PASS in .env');
     }
+
+    console.log('========================================');
     
-    console.log('================================');
-    
-    // WICHTIG: Review Monitor starten (nur wenn Google API Key vorhanden)
+    // Review Monitor starten
     if (process.env.GOOGLE_PLACES_API_KEY) {
       reviewMonitor.startMonitoring();
       console.log('✅ Google Review Monitoring AKTIV');
-      console.log('   ✅ E-Mails NUR bei neuen Bewertungen');
-      console.log('   ❌ KEINE E-Mails bei QR-Scans');
-      console.log('   ⏱️  Prüfintervall: 60 Sekunden');
-      console.log('   🔍 Überwacht alle Restaurants mit Place ID');
+      console.log('   ⏱️  Check-Intervall: 30 Sekunden');
+      console.log('   📧 E-Mails nur bei neuen Bewertungen');
     } else {
-      console.log('⚠️  Google Review Monitoring DEAKTIVIERT');
-      console.log('   ❌ Grund: GOOGLE_PLACES_API_KEY fehlt in .env');
-      console.log('   ❌ KEINE automatischen E-Mails möglich');
-      console.log('   ℹ️  Fügen Sie Google API Key hinzu für Review-Erkennung');
+      console.log('⚠️  Google Review Monitoring INAKTIV');
+      console.log('   Grund: GOOGLE_PLACES_API_KEY fehlt');
     }
+
+    console.log('========================================');
     
-    console.log('================================');
+    // Keep-Alive Service starten (nur in Production)
+    if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
+      keepAliveService.start();
+      console.log('✅ Keep-Alive Service AKTIV');
+      console.log('   🔄 Server bleibt aktiv (Render Free Plan)');
+      console.log('   ⏱️  Aktivität alle 10 Minuten');
+    } else {
+      console.log('ℹ️  Keep-Alive Service INAKTIV (nur in Production)');
+    }
+
+    console.log('========================================');
     
     // Server starten
     app.listen(PORT, '0.0.0.0', () => {
-      console.log('✅ Server läuft!');
-      console.log(`   Lokal: http://localhost:${PORT}`);
-      console.log(`   API: ${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}`);
-      console.log('================================');
+      console.log('✅ Server erfolgreich gestartet!');
+      console.log(`   🌐 Port: ${PORT}`);
+      console.log(`   📍 Lokal: http://localhost:${PORT}`);
       
-      if (process.env.GOOGLE_PLACES_API_KEY) {
-        console.log('📌 System-Verhalten MIT Google API:');
-        console.log('   1. QR-Code Scan → Tracking (keine E-Mail)');
-        console.log('   2. Google prüft alle 60 Sekunden auf neue Reviews');
-        console.log('   3. Neue Review gefunden → E-Mail an Restaurant');
-        console.log('   4. E-Mail enthält: Autor, Rating, Text der Review');
-      } else {
-        console.log('📌 System-Verhalten OHNE Google API:');
-        console.log('   1. QR-Code Scan → nur Weiterleitung');
-        console.log('   2. Keine Review-Erkennung möglich');
-        console.log('   3. Keine automatischen E-Mails');
+      if (process.env.BACKEND_URL) {
+        console.log(`   🌍 Public: ${process.env.BACKEND_URL}`);
       }
-      console.log('================================');
       
-      // Statistiken anzeigen
-      showStartupStats();
+      if (process.env.RENDER) {
+        console.log(`   ☁️  Render: ${process.env.RENDER_EXTERNAL_URL}`);
+      }
+      
+      console.log('========================================');
+      console.log('📋 Verfügbare Endpoints:');
+      console.log('   GET  /api/health - System Health Check');
+      console.log('   POST /api/restaurant/auth/login - Restaurant Login');
+      console.log('   POST /api/admin/auth/login - Admin Login');
+      console.log('   GET  /api/public/track/:token - QR Code Tracking');
+      console.log('========================================');
+      console.log('🎉 System bereit für Anfragen!');
+      console.log('========================================');
     });
+
   } catch (error) {
-    console.error('❌ Server Start Fehler:', error);
+    console.error('❌ Server-Initialisierung fehlgeschlagen:', error);
+    console.error(error.stack);
     process.exit(1);
   }
 }
 
-// Startup Statistiken
-async function showStartupStats() {
-  try {
-    const { User, Restaurant, Table } = require('./src/models');
-    
-    const userCount = await User.count();
-    const restaurantCount = await Restaurant.count();
-    const tableCount = await Table.count();
-    const activeRestaurants = await Restaurant.count({ where: { is_active: true } });
-    
-    console.log('📊 System-Statistiken:');
-    console.log(`   Benutzer: ${userCount}`);
-    console.log(`   Restaurants: ${restaurantCount} (${activeRestaurants} aktiv)`);
-    console.log(`   Tische/QR-Codes: ${tableCount}`);
-    console.log('================================');
-  } catch (error) {
-    console.error('Statistik-Fehler:', error.message);
-  }
-}
-
-// Graceful Shutdown
-process.on('SIGTERM', async () => {
-  console.log('⏹️  SIGTERM empfangen, fahre herunter...');
-  
-  // Review Monitor stoppen
-  if (reviewMonitor.isRunning) {
-    reviewMonitor.stopMonitoring();
-    console.log('   Review Monitor gestoppt');
-  }
-  
-  // Datenbankverbindung schließen
-  await sequelize.close();
-  console.log('   Datenbank geschlossen');
-  
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('⏹️  SIGINT empfangen, fahre herunter...');
-  
-  // Review Monitor stoppen
-  if (reviewMonitor.isRunning) {
-    reviewMonitor.stopMonitoring();
-    console.log('   Review Monitor gestoppt');
-  }
-  
-  // Datenbankverbindung schließen
-  await sequelize.close();
-  console.log('   Datenbank geschlossen');
-  
-  process.exit(0);
-});
-
-// Unhandled Rejection Handler
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// Uncaught Exception Handler
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+// Server starten
+initializeServer().catch(error => {
+  console.error('❌ Kritischer Fehler beim Serverstart:', error);
   process.exit(1);
 });
-
-// Server starten
-startServer();
