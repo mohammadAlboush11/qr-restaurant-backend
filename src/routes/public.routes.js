@@ -1,277 +1,171 @@
-const axios = require('axios');
-const { Op } = require('sequelize');
-const { Restaurant, Table, ReviewNotification } = require('../models');
-const emailService = require('./email.service');
+const express = require('express');
+const router = express.Router();
+const { Table, Restaurant } = require('../models');
+const reviewMonitor = require('../services/review-monitor.service');
 
-class ReviewMonitorService {
-  constructor() {
-    this.apiKey = process.env.GOOGLE_PLACES_API_KEY;
-    this.scanTracking = new Map(); // Speichert QR-Scans
-    this.checkInterval = 60 * 1000; // Jede Minute prüfen
-    this.isRunning = false;
-    this.lastReviewIds = new Map(); // Speichert letzte Review IDs pro Restaurant
-  }
-
-  // QR-Code wurde gescannt - NUR tracken, KEINE E-Mail!
-  trackScan(restaurantId, tableId) {
-    const now = Date.now();
-    const key = `${restaurantId}_${tableId}_${now}`;
+// QR-Code Scan - NUR Tracking, KEINE E-Mail!
+router.get('/qr/:tableId', async (req, res) => {
+  try {
+    console.log(`📱 QR-Code Scan: Table ID ${req.params.tableId}`);
     
-    this.scanTracking.set(key, {
-      restaurantId,
-      tableId,
-      timestamp: now,
-      checked: false
+    const table = await Table.findByPk(req.params.tableId, {
+      include: [Restaurant]
     });
-    
-    console.log(`📱 Scan getrackt für Restaurant ${restaurantId}, Tisch ${tableId}`);
-    console.log(`   KEINE E-Mail gesendet - warte auf echte Bewertung`);
-    
-    // Nach 2, 5 und 10 Minuten prüfen ob neue Bewertung
-    [2, 5, 10].forEach(minutes => {
-      setTimeout(() => {
-        this.checkForNewReview(restaurantId, tableId);
-      }, minutes * 60 * 1000);
-    });
-    
-    // Nach 30 Minuten aus Tracking entfernen
-    setTimeout(() => {
-      this.scanTracking.delete(key);
-    }, 30 * 60 * 1000);
-  }
 
-  async checkForNewReview(restaurantId, tableId = null) {
-    if (!this.apiKey) {
-      console.log('⚠️ Google Places API Key nicht konfiguriert - kann keine Reviews prüfen');
-      return false;
+    // === Validierungen ===
+    if (!table) {
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>QR-Code ungültig</title>
+          <style>
+            body { 
+              font-family: Arial, sans-serif; 
+              display: flex; 
+              justify-content: center; 
+              align-items: center; 
+              height: 100vh; 
+              margin: 0; 
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            }
+            .container { 
+              background: white; 
+              padding: 40px; 
+              border-radius: 10px; 
+              box-shadow: 0 10px 30px rgba(0,0,0,0.3); 
+              text-align: center;
+              max-width: 400px;
+            }
+            h1 { color: #dc3545; }
+            .icon { font-size: 60px; margin-bottom: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="icon">❌</div>
+            <h1>QR-Code ungültig</h1>
+            <p>Dieser QR-Code existiert nicht mehr.</p>
+          </div>
+        </body>
+        </html>
+      `);
     }
 
-    try {
-      const restaurant = await Restaurant.findByPk(restaurantId);
+    if (!table.is_active || !table.Restaurant?.is_active) {
+      return res.status(403).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Service nicht verfügbar</title>
+          <style>
+            body { 
+              font-family: Arial, sans-serif; 
+              display: flex; 
+              justify-content: center; 
+              align-items: center; 
+              height: 100vh; 
+              margin: 0; 
+              background: linear-gradient(135deg, #FA8BFF 0%, #2BD2FF 52%, #2BFF88 90%); 
+            }
+            .container { 
+              background: white; 
+              padding: 40px; 
+              border-radius: 10px; 
+              box-shadow: 0 10px 30px rgba(0,0,0,0.3); 
+              text-align: center;
+              max-width: 400px;
+            }
+            h1 { color: #dc3545; }
+            .icon { font-size: 60px; margin-bottom: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="icon">🚫</div>
+            <h1>Service nicht verfügbar</h1>
+            <p>Der QR-Code Service ist momentan deaktiviert.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    if (!table.Restaurant.google_business_url) {
+      return res.status(500).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Konfiguration fehlt</title>
+        </head>
+        <body>
+          <div style="text-align: center; padding: 50px; font-family: Arial;">
+            <h1>⚙️ Konfiguration fehlt</h1>
+            <p>Google Business URL nicht eingerichtet.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    // === Scan Count erhöhen ===
+    table.scan_count = (table.scan_count || 0) + 1;
+    await table.save();
+    console.log(`✅ Scan ${table.scan_count} für Tisch ${table.table_number}`);
+
+    // === WICHTIG: NUR Tracking, KEINE E-Mail! ===
+    if (process.env.GOOGLE_PLACES_API_KEY && table.Restaurant.google_place_id) {
+      // MIT Google API: Tracking für spätere Review-Prüfung
+      console.log('🔍 Scan getrackt für Review-Monitoring');
+      reviewMonitor.trackScan(table.restaurant_id, table.id);
       
-      if (!restaurant || !restaurant.google_place_id) {
-        console.log(`⚠️ Restaurant ${restaurantId} hat keine Google Place ID`);
-        return false;
-      }
-
-      console.log(`🔍 Prüfe auf neue Bewertungen für ${restaurant.name}...`);
-
-      // Google Places API abfragen
-      const response = await axios.get(
-        'https://maps.googleapis.com/maps/api/place/details/json',
-        {
-          params: {
-            place_id: restaurant.google_place_id,
-            fields: 'reviews,user_ratings_total,rating',
-            key: this.apiKey,
-            language: 'de'
-          }
-        }
-      );
-
-      if (response.data.status !== 'OK') {
-        console.error('❌ Google API Error:', response.data.status);
-        if (response.data.error_message) {
-          console.error('   Details:', response.data.error_message);
-        }
-        return false;
-      }
-
-      const result = response.data.result;
-      const currentCount = result.user_ratings_total || 0;
-      const lastCount = restaurant.last_review_count || 0;
-      const reviews = result.reviews || [];
-
-      console.log(`   Aktuelle Bewertungen: ${currentCount}`);
-      console.log(`   Letzte bekannte Anzahl: ${lastCount}`);
-
-      // Prüfe ob neue Bewertung
-      if (currentCount > lastCount || this.hasNewReview(restaurantId, reviews)) {
-        console.log(`🌟 NEUE BEWERTUNG GEFUNDEN für ${restaurant.name}!`);
-        
-        // Neueste Review finden
-        const latestReview = reviews[0]; // Google gibt sortiert zurück
-        
-        // Prüfe ob diese Review schon verarbeitet wurde
-        const lastProcessedId = this.lastReviewIds.get(restaurantId);
-        const currentReviewId = this.generateReviewId(latestReview);
-        
-        if (currentReviewId !== lastProcessedId) {
-          // Tisch ermitteln (falls von QR-Scan)
-          let table = null;
-          if (tableId) {
-            table = await Table.findByPk(tableId);
-          }
-          
-          // JETZT E-Mail senden - NUR bei echter neuer Bewertung!
-          console.log(`📧 Sende E-Mail für NEUE BEWERTUNG an ${restaurant.email}`);
-          
-          const emailSent = await emailService.sendNewReviewNotification(
-            restaurant,
-            table,
-            {
-              author: latestReview?.author_name || 'Anonym',
-              rating: latestReview?.rating,
-              text: latestReview?.text,
-              time: latestReview?.time ? new Date(latestReview.time * 1000) : new Date(),
-              profilePhoto: latestReview?.profile_photo_url
-            }
-          );
-          
-          if (emailSent) {
-            console.log(`✅ E-Mail erfolgreich gesendet!`);
-            
-            // Review in DB speichern
-            await ReviewNotification.create({
-              restaurant_id: restaurantId,
-              table_id: tableId,
-              review_author: latestReview?.author_name,
-              review_text: latestReview?.text,
-              review_rating: latestReview?.rating,
-              review_time: latestReview?.time ? new Date(latestReview.time * 1000) : new Date(),
-              notification_sent: true
-            });
-            
-            // Letzte Review ID speichern
-            this.lastReviewIds.set(restaurantId, currentReviewId);
-          }
-          
-          // Review Count aktualisieren
-          restaurant.last_review_count = currentCount;
-          restaurant.last_review_check = new Date();
-          await restaurant.save();
-          
-          return true;
-        } else {
-          console.log('   Diese Bewertung wurde bereits verarbeitet');
-        }
-      } else {
-        console.log('   Keine neuen Bewertungen gefunden');
-      }
-      
-      return false;
-    } catch (error) {
-      console.error('❌ Review Check Error:', error.message);
-      if (error.response?.data) {
-        console.error('   API Response:', error.response.data);
-      }
-      return false;
+      // KEINE E-Mail hier! E-Mail kommt NUR wenn Review erkannt wird!
+    } else {
+      console.log('⚠️ Google API nicht konfiguriert - keine Review-Erkennung möglich');
     }
-  }
 
-  // Prüfe ob es neue Reviews gibt die wir noch nicht kennen
-  hasNewReview(restaurantId, reviews) {
-    if (!reviews || reviews.length === 0) return false;
+    // === Weiterleitung zu Google Reviews ===
+    console.log(`🔄 Weiterleitung zu: ${table.Restaurant.google_business_url}`);
+    res.redirect(table.Restaurant.google_business_url);
     
-    const lastId = this.lastReviewIds.get(restaurantId);
-    const currentId = this.generateReviewId(reviews[0]);
-    
-    return currentId !== lastId;
+  } catch (error) {
+    console.error('❌ QR Scan Error:', error);
+    res.status(500).send('Ein Fehler ist aufgetreten');
   }
+});
 
-  // Generiere eindeutige ID für Review
-  generateReviewId(review) {
-    if (!review) return null;
-    // Kombination aus Author, Zeit und Rating für Eindeutigkeit
-    return `${review.author_name}_${review.time}_${review.rating}`;
+// Test-Endpoint für E-Mail
+router.get('/test-email/:email', async (req, res) => {
+  const emailService = require('../services/email.service');
+  const email = req.params.email;
+  console.log(`📧 Test-E-Mail an ${email}`);
+  
+  const sent = await emailService.sendTestEmail(email);
+  
+  if (sent) {
+    res.json({ success: true, message: `Test-E-Mail gesendet an ${email}` });
+  } else {
+    res.status(500).json({ success: false, message: 'E-Mail konnte nicht gesendet werden' });
   }
+});
 
-  // Periodische Überprüfung aller Restaurants
-  startMonitoring() {
-    if (this.isRunning) return;
-    
-    if (!this.apiKey) {
-      console.log('⚠️ Review Monitoring NICHT gestartet - Google API Key fehlt!');
-      console.log('   Setzen Sie GOOGLE_PLACES_API_KEY in .env');
-      return;
+// Health Check
+router.get('/health', (req, res) => {
+  const reviewMonitor = require('../services/review-monitor.service');
+  res.json({ 
+    status: 'OK',
+    timestamp: new Date(),
+    services: {
+      googleAPI: process.env.GOOGLE_PLACES_API_KEY ? 'configured' : 'not configured',
+      reviewMonitor: reviewMonitor.isRunning ? 'running' : 'stopped'
     }
-    
-    this.isRunning = true;
-    console.log('✅ Review Monitoring gestartet');
-    console.log(`   Prüfintervall: ${this.checkInterval / 1000} Sekunden`);
-    console.log('   E-Mails werden NUR bei neuen Bewertungen gesendet');
-    
-    // Initial alle Restaurants laden um Baseline zu setzen
-    this.initializeBaseline();
-    
-    // Periodische Prüfung
-    this.intervalId = setInterval(async () => {
-      try {
-        const restaurants = await Restaurant.findAll({
-          where: { 
-            is_active: true,
-            google_place_id: { [Op.ne]: null }
-          }
-        });
-        
-        for (const restaurant of restaurants) {
-          await this.checkForNewReview(restaurant.id);
-        }
-      } catch (error) {
-        console.error('Monitoring Error:', error);
-      }
-    }, this.checkInterval);
-  }
+  });
+});
 
-  // Initiale Baseline setzen
-  async initializeBaseline() {
-    try {
-      const restaurants = await Restaurant.findAll({
-        where: { 
-          is_active: true,
-          google_place_id: { [Op.ne]: null }
-        }
-      });
-
-      console.log(`📊 Initialisiere Baseline für ${restaurants.length} Restaurants...`);
-
-      for (const restaurant of restaurants) {
-        try {
-          const response = await axios.get(
-            'https://maps.googleapis.com/maps/api/place/details/json',
-            {
-              params: {
-                place_id: restaurant.google_place_id,
-                fields: 'reviews,user_ratings_total',
-                key: this.apiKey,
-                language: 'de'
-              }
-            }
-          );
-
-          if (response.data.status === 'OK') {
-            const result = response.data.result;
-            const currentCount = result.user_ratings_total || 0;
-            
-            // Speichere aktuelle Anzahl
-            restaurant.last_review_count = currentCount;
-            restaurant.last_review_check = new Date();
-            await restaurant.save();
-            
-            // Speichere letzte Review ID
-            if (result.reviews && result.reviews.length > 0) {
-              const reviewId = this.generateReviewId(result.reviews[0]);
-              this.lastReviewIds.set(restaurant.id, reviewId);
-            }
-            
-            console.log(`   ✅ ${restaurant.name}: ${currentCount} Bewertungen`);
-          }
-        } catch (error) {
-          console.error(`   ❌ Fehler bei ${restaurant.name}:`, error.message);
-        }
-      }
-    } catch (error) {
-      console.error('Baseline Initialization Error:', error);
-    }
-  }
-
-  stopMonitoring() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.isRunning = false;
-      console.log('⏹️ Review Monitoring gestoppt');
-    }
-  }
-}
-
-module.exports = new ReviewMonitorService();
+module.exports = router;
