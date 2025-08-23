@@ -1,205 +1,237 @@
+/**
+ * Google Reviews Integration Service - KORRIGIERT
+ * Speichern als: backend/src/services/google-reviews.service.js
+ */
+
 const axios = require('axios');
-const { Op } = require('sequelize');
-const { Restaurant, ReviewNotification, Table } = require('../models');
+const { Restaurant, Scan, ActivityLog, Table } = require('../models');
 const emailService = require('./email.service');
+const logger = require('../utils/logger');
+const { Op } = require('sequelize');
 
 class GoogleReviewsService {
-  constructor() {
-    this.apiKey = process.env.GOOGLE_PLACES_API_KEY || '';
-    this.checkInterval = 10 * 60 * 1000; // 10 Minuten für schnellere Erkennung
-    this.recentScans = new Map(); // Speichert recent QR-Scans
-  }
+    constructor() {
+        this.checkInterval = process.env.REVIEW_CHECK_INTERVAL || 120000; // 2 Minuten
+        this.isMonitoring = false;
+        this.processedScans = new Set(); // Verhindert doppelte E-Mails
+        this.lastReviewCounts = new Map(); // Speichert letzte bekannte Review-Zahlen
+    }
 
-  // QR-Code wurde gescannt - speichern für spätere Zuordnung
-  async trackQRScan(tableId) {
-    try {
-      const table = await Table.findByPk(tableId, {
-        include: [Restaurant]
-      });
-
-      if (!table) return false;
-
-      // Scan Count erhöhen
-      table.scan_count = (table.scan_count || 0) + 1;
-      await table.save();
-
-      // Scan für spätere Zuordnung speichern (30 Minuten gültig)
-      const scanKey = `${table.restaurant_id}_${Date.now()}`;
-      this.recentScans.set(scanKey, {
-        tableId: table.id,
-        tableNumber: table.table_number,
-        restaurantId: table.restaurant_id,
-        timestamp: Date.now()
-      });
-
-      // Alte Scans aufräumen (älter als 30 Minuten)
-      this.cleanupOldScans();
-
-      // Nach 2 Minuten erste Prüfung, dann nach 5 und 10 Minuten
-      [2, 5, 10].forEach(minutes => {
+    startMonitoring() {
+        if (this.isMonitoring) return;
+        
+        this.isMonitoring = true;
+        
+        // Initial Check nach 10 Sekunden
         setTimeout(() => {
-          this.checkForNewReviews(table.restaurant_id, table.id);
-        }, minutes * 60 * 1000);
-      });
+            this.checkForNewScans();
+        }, 10000);
+        
+        // Dann alle 2 Minuten
+        this.monitoringInterval = setInterval(() => {
+            this.checkForNewScans();
+        }, this.checkInterval);
 
-      console.log(`QR-Scan tracked: Table ${table.table_number}, Restaurant ${table.restaurant_id}`);
-      return true;
-    } catch (error) {
-      console.error('Track QR Scan Error:', error);
-      return false;
-    }
-  }
-
-  // Alte Scans aufräumen
-  cleanupOldScans() {
-    const thirtyMinutesAgo = Date.now() - (30 * 60 * 1000);
-    for (const [key, scan] of this.recentScans.entries()) {
-      if (scan.timestamp < thirtyMinutesAgo) {
-        this.recentScans.delete(key);
-      }
-    }
-  }
-
-  // Finde wahrscheinlichen Tisch für neue Review
-  findProbableTable(restaurantId) {
-    const fifteenMinutesAgo = Date.now() - (15 * 60 * 1000);
-    let mostRecentScan = null;
-
-    for (const scan of this.recentScans.values()) {
-      if (scan.restaurantId === restaurantId && scan.timestamp > fifteenMinutesAgo) {
-        if (!mostRecentScan || scan.timestamp > mostRecentScan.timestamp) {
-          mostRecentScan = scan;
-        }
-      }
+        logger.info('✅ Google Review Monitoring gestartet');
+        logger.info(`   Prüfintervall: ${this.checkInterval / 60000} Minuten`);
+        logger.info('   E-Mails nur bei neuen Scans (nicht bei QR-Erstellung)');
     }
 
-    return mostRecentScan;
-  }
+    stopMonitoring() {
+        if (!this.isMonitoring) return;
+        
+        clearInterval(this.monitoringInterval);
+        this.isMonitoring = false;
+        this.processedScans.clear();
+        
+        logger.info('Google Reviews monitoring stopped');
+    }
 
-  async checkForNewReviews(restaurantId, triggeredByTableId = null) {
-    try {
-      const restaurant = await Restaurant.findByPk(restaurantId);
-      
-      if (!restaurant || !restaurant.is_active) {
-        console.log(`Restaurant ${restaurantId} nicht aktiv oder nicht gefunden`);
-        return;
-      }
+    /**
+     * Prüft auf neue Scans und sendet E-Mails
+     */
+    async checkForNewScans() {
+        try {
+            // Hole alle Scans der letzten 2 Minuten
+            const recentScans = await Scan.findAll({
+                where: {
+                    created_at: {
+                        [Op.gte]: new Date(Date.now() - this.checkInterval)
+                    }
+                },
+                include: [
+                    {
+                        model: Table,
+                        as: 'table',
+                        required: false
+                    },
+                    {
+                        model: Restaurant,
+                        as: 'restaurant',
+                        required: true,
+                        where: {
+                            is_active: true
+                        }
+                    }
+                ],
+                order: [['created_at', 'DESC']]
+            });
 
-      // Wenn kein Google Place ID, versuche trotzdem E-Mail zu senden wenn von QR-Scan getriggert
-      if (triggeredByTableId && !restaurant.google_place_id) {
-        const table = await Table.findByPk(triggeredByTableId);
-        if (table) {
-          console.log(`Sende präventive E-Mail für Table ${table.table_number}`);
-          await emailService.sendReviewNotification(
-            restaurant,
-            table,
-            {
-              author: 'Gast',
-              rating: null,
-              text: 'Ein Gast hat Ihren QR-Code gescannt und wurde zu Google Reviews weitergeleitet.'
-            }
-          );
-        }
-        return;
-      }
-
-      // Wenn Google Places API konfiguriert ist
-      if (restaurant.google_place_id && this.apiKey) {
-        const response = await axios.get(
-          `https://maps.googleapis.com/maps/api/place/details/json`,
-          {
-            params: {
-              place_id: restaurant.google_place_id,
-              fields: 'reviews,user_ratings_total,rating',
-              key: this.apiKey,
-              language: 'de'
-            }
-          }
-        );
-
-        if (response.data.result) {
-          const currentReviewCount = response.data.result.user_ratings_total || 0;
-          
-          // Prüfen ob neue Bewertungen vorhanden sind
-          if (currentReviewCount > (restaurant.last_review_count || 0)) {
-            const newReviews = response.data.result.reviews || [];
-            
-            // Versuche Tisch zuzuordnen
-            const probableTable = this.findProbableTable(restaurantId);
-            let table = null;
-            
-            if (probableTable) {
-              table = await Table.findByPk(probableTable.tableId);
-            }
-
-            // Neueste Bewertung verarbeiten
-            if (newReviews.length > 0) {
-              const latestReview = newReviews[0];
-              
-              // Benachrichtigung in DB speichern
-              const notification = await ReviewNotification.create({
-                restaurant_id: restaurantId,
-                table_id: table ? table.id : null,
-                review_author: latestReview.author_name,
-                review_text: latestReview.text,
-                review_rating: latestReview.rating,
-                review_time: new Date(latestReview.time * 1000),
-                notification_sent: false
-              });
-
-              // E-Mail senden
-              const emailSent = await emailService.sendReviewNotification(
-                restaurant,
-                table || { table_number: 'Unbekannt' },
-                {
-                  author: latestReview.author_name,
-                  rating: latestReview.rating,
-                  text: latestReview.text
+            // Verarbeite jeden Scan
+            for (const scan of recentScans) {
+                // Skip wenn bereits verarbeitet
+                if (this.processedScans.has(scan.id)) {
+                    continue;
                 }
-              );
 
-              if (emailSent) {
-                notification.notification_sent = true;
-                await notification.save();
-                console.log(`E-Mail gesendet für neue Review an ${restaurant.email}`);
-              }
+                // Markiere als verarbeitet
+                this.processedScans.add(scan.id);
+
+                // Sende Scan-Benachrichtigung
+                await this.sendScanNotification(scan);
+
+                // Plane Follow-up nach 5 Minuten
+                this.scheduleFollowUp(scan);
             }
 
-            // Review Count aktualisieren
-            restaurant.last_review_count = currentReviewCount;
-            restaurant.last_review_check = new Date();
-            await restaurant.save();
-          }
+            // Bereinige alte processedScans (älter als 1 Stunde)
+            if (this.processedScans.size > 100) {
+                this.processedScans.clear();
+            }
+
+        } catch (error) {
+            logger.error('Error checking for new scans:', error);
         }
-      }
-    } catch (error) {
-      console.error('Google Reviews Check Error:', error);
     }
-  }
 
-  // Regelmäßige Überprüfung für alle Restaurants
-  startPeriodicCheck() {
-    console.log('Starte periodische Review-Überprüfung...');
-    
-    setInterval(async () => {
-      try {
-        const restaurants = await Restaurant.findAll({
-          where: {
-            is_active: true,
-            google_place_id: { [Op.ne]: null }
-          }
-        });
+    /**
+     * Sendet E-Mail-Benachrichtigung für neuen Scan
+     */
+    async sendScanNotification(scan) {
+        try {
+            const restaurant = scan.restaurant;
+            const table = scan.table;
+            
+            // Bestimme E-Mail-Empfänger
+            const recipientEmail = restaurant.contact?.email || 
+                                 restaurant.owner?.email || 
+                                 process.env.NOTIFICATION_EMAIL || 
+                                 'mohammadalboush8@gmail.com';
 
-        console.log(`Prüfe ${restaurants.length} aktive Restaurants auf neue Reviews...`);
+            const emailData = {
+                restaurant_name: restaurant.name,
+                table_number: table?.number || 'Unbekannt',
+                table_name: table?.name || `Tisch ${table?.number || 'Unbekannt'}`,
+                scan_time: new Date(scan.created_at).toLocaleString('de-DE'),
+                scan_id: scan.id,
+                device_info: scan.device_info,
+                google_url: restaurant.google_reviews_url
+            };
 
-        for (const restaurant of restaurants) {
-          await this.checkForNewReviews(restaurant.id);
+            // Sende E-Mail
+            await emailService.sendScanNotification(recipientEmail, emailData);
+            
+            logger.info(`📧 Scan-Benachrichtigung gesendet an ${recipientEmail} für Tisch ${emailData.table_number}`);
+
+            // Log Activity
+            await ActivityLog.create({
+                restaurant_id: restaurant.id,
+                action: 'scan_notification_sent',
+                category: 'email',
+                metadata: {
+                    table: emailData.table_number,
+                    recipient: recipientEmail,
+                    scan_id: scan.id
+                }
+            });
+
+        } catch (error) {
+            logger.error('Error sending scan notification:', error);
         }
-      } catch (error) {
-        console.error('Periodic Check Error:', error);
-      }
-    }, this.checkInterval);
-  }
+    }
+
+    /**
+     * Plant Follow-up E-Mail nach 5 Minuten
+     */
+    scheduleFollowUp(scan) {
+        setTimeout(async () => {
+            try {
+                const restaurant = scan.restaurant;
+                const table = scan.table;
+                
+                const recipientEmail = restaurant.contact?.email || 
+                                     restaurant.owner?.email || 
+                                     process.env.NOTIFICATION_EMAIL || 
+                                     'mohammadalboush8@gmail.com';
+
+                const emailData = {
+                    restaurant_name: restaurant.name,
+                    table_number: table?.number || 'Unbekannt',
+                    scan_time: new Date(scan.created_at).toLocaleString('de-DE'),
+                    minutes_passed: 5,
+                    probability: 'HOCH',
+                    google_url: restaurant.google_reviews_url
+                };
+
+                // Sende Follow-up E-Mail
+                await emailService.sendReviewProbability(recipientEmail, emailData);
+                
+                logger.info(`📧 Follow-up E-Mail gesendet für Tisch ${emailData.table_number}`);
+
+            } catch (error) {
+                logger.error('Error sending follow-up email:', error);
+            }
+        }, 5 * 60 * 1000); // 5 Minuten
+    }
+
+    /**
+     * DEAKTIVIERT: Alte fehlerhafte Methode
+     */
+    async checkRestaurantReviews(restaurant) {
+        // Diese Methode ist deaktiviert, da sie falsche E-Mails sendet
+        logger.debug('checkRestaurantReviews ist deaktiviert');
+        return;
+    }
+
+    /**
+     * Manuelle Prüfung für ein Restaurant (Admin-Funktion)
+     */
+    async manualCheck(restaurantId) {
+        try {
+            const restaurant = await Restaurant.findByPk(restaurantId, {
+                include: ['owner']
+            });
+
+            if (!restaurant) {
+                throw new Error('Restaurant nicht gefunden');
+            }
+
+            // Hole die letzten 5 Scans
+            const recentScans = await Scan.findAll({
+                where: {
+                    restaurant_id: restaurantId,
+                    created_at: {
+                        [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Letzte 24 Stunden
+                    }
+                },
+                include: ['table'],
+                order: [['created_at', 'DESC']],
+                limit: 5
+            });
+
+            logger.info(`Manual check for ${restaurant.name}: ${recentScans.length} scans in last 24h`);
+
+            return {
+                restaurant: restaurant.name,
+                scans_24h: recentScans.length,
+                last_scan: recentScans[0]?.created_at || null
+            };
+
+        } catch (error) {
+            logger.error('Error in manual check:', error);
+            throw error;
+        }
+    }
 }
 
 module.exports = new GoogleReviewsService();

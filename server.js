@@ -1,4 +1,9 @@
-﻿const express = require('express');
+﻿/**
+ * Server.js - Korrigierte Version
+ * Speichern als: backend/server.js
+ */
+
+const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
@@ -9,14 +14,13 @@ const adminRoutes = require('./src/routes/admin.routes');
 const restaurantRoutes = require('./src/routes/restaurant.routes');
 const publicRoutes = require('./src/routes/public.routes');
 
-// WICHTIG: Review Monitor Service importieren
+// WICHTIG: NUR Review Monitor Service importieren (NICHT scan-notification!)
 const reviewMonitor = require('./src/services/review-monitor.service');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // CORS Konfiguration
-// CORS Konfiguration ERWEITERT
 const corsOptions = {
   origin: function (origin, callback) {
     // Erlaubt Requests ohne Origin (z.B. Postman, lokale Tests)
@@ -25,7 +29,7 @@ const corsOptions = {
     const allowedOrigins = [
       'https://lt-express.de',
       'https://www.lt-express.de',
-      'https://qr-restaurant-managment.onrender.com', // Frontend auf Render
+      'https://qr-restaurant-managment.onrender.com',
       'http://localhost:3000',
       'http://localhost:3001'
     ];
@@ -118,16 +122,24 @@ async function startServer() {
     console.log(`   SMTP-Host: ${process.env.SMTP_HOST || 'nicht konfiguriert'}`);
     console.log(`   SMTP-User: ${process.env.SMTP_USER || 'nicht konfiguriert'}`);
     
-    // WICHTIG: Review Monitor starten (nur wenn Google API Key vorhanden)
+    // WICHTIG: Review Monitor starten
     if (process.env.GOOGLE_PLACES_API_KEY) {
       reviewMonitor.startMonitoring();
       console.log('✅ Google Review Monitoring gestartet');
       console.log('   Prüfintervall: 2 Minuten');
-      console.log('   E-Mails nur bei neuen Bewertungen');
+      console.log('   ⚠️  E-Mails NUR bei echten Google-Bewertungen');
+      console.log('   ❌ KEINE E-Mails bei QR-Code Scans');
     } else {
-      console.log('⚠️  Google Review Monitoring deaktiviert');
+      console.log('❌ KRITISCHER FEHLER: Google Review Monitoring NICHT aktiv!');
       console.log('   Grund: GOOGLE_PLACES_API_KEY fehlt in .env');
-      console.log('   E-Mails werden mit 5 Min Verzögerung gesendet');
+      console.log('   LÖSUNG: Google Places API Key hier erstellen:');
+      console.log('   https://developers.google.com/maps/documentation/places/web-service/get-api-key');
+      console.log('');
+      console.log('   OHNE API KEY:');
+      console.log('   ❌ Keine Erkennung echter Bewertungen');
+      console.log('   ❌ Keine E-Mail-Benachrichtigungen');
+      console.log('   ✅ QR-Codes funktionieren weiterhin');
+      console.log('   ✅ Weiterleitung zu Google Reviews funktioniert');
     }
     
     console.log('================================');
@@ -140,15 +152,17 @@ async function startServer() {
       console.log('================================');
       
       if (process.env.GOOGLE_PLACES_API_KEY) {
-        console.log('📌 Funktionen MIT Google API:');
-        console.log('   • Erkennung neuer Bewertungen');
-        console.log('   • E-Mail nur bei tatsächlicher Bewertung');
-        console.log('   • Autor und Bewertungstext in E-Mail');
+        console.log('📌 AKTIVE FUNKTIONEN:');
+        console.log('   ✅ Erkennung echter Google-Bewertungen');
+        console.log('   ✅ E-Mail NUR bei neuen Bewertungen');
+        console.log('   ✅ Autor und Bewertungstext in E-Mail');
+        console.log('   ✅ Vermutete Tisch-Zuordnung');
       } else {
-        console.log('📌 Funktionen OHNE Google API:');
-        console.log('   • QR-Code Scans werden getrackt');
-        console.log('   • E-Mail 5 Minuten nach Scan');
-        console.log('   • Weiterleitung zu Google Reviews');
+        console.log('📌 EINGESCHRÄNKTER MODUS (ohne Google API):');
+        console.log('   ✅ QR-Code Scans werden getrackt');
+        console.log('   ❌ KEINE E-Mails bei Scans');
+        console.log('   ❌ KEINE Erkennung echter Bewertungen');
+        console.log('   ✅ Weiterleitung zu Google Reviews funktioniert');
       }
       console.log('================================');
     });
@@ -160,13 +174,15 @@ async function startServer() {
 
 // Graceful Shutdown
 process.on('SIGTERM', async () => {
-  console.log('⏹️  SIGTERM empfangen, fahre herunter...');
+  console.log('⏹️ SIGTERM empfangen, fahre herunter...');
+  reviewMonitor.stopMonitoring();
   await sequelize.close();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-  console.log('⏹️  SIGINT empfangen, fahre herunter...');
+  console.log('⏹️ SIGINT empfangen, fahre herunter...');
+  reviewMonitor.stopMonitoring();
   await sequelize.close();
   process.exit(0);
 });
