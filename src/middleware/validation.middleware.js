@@ -1,244 +1,306 @@
 /**
- * Validation Middleware
+ * Validation Middleware - MIT OPTIONALEM EXPRESS-VALIDATOR
  * Speichern als: backend/src/middleware/validation.middleware.js
  */
 
-const { body, param, query, validationResult } = require('express-validator');
-const { AppError } = require('./errorHandler');
+// Versuche express-validator zu laden
+let validationResult, body, param, query, check;
+let hasExpressValidator = false;
 
-// Check validation results
-const validate = (req, res, next) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        const errorMessages = errors.array().map(error => ({
-            field: error.param,
-            message: error.msg
-        }));
+try {
+  const expressValidator = require('express-validator');
+  validationResult = expressValidator.validationResult;
+  body = expressValidator.body;
+  param = expressValidator.param;
+  query = expressValidator.query;
+  check = expressValidator.check;
+  hasExpressValidator = true;
+  console.log('✅ express-validator geladen');
+} catch (error) {
+  console.log('⚠️ express-validator nicht verfügbar - verwende Basis-Validierung');
+}
 
+class ValidationMiddleware {
+  // Generische Validierungs-Handler
+  handleValidationErrors(req, res, next) {
+    if (hasExpressValidator) {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
         return res.status(400).json({
-            success: false,
-            message: 'Validierungsfehler',
-            errors: errorMessages
+          success: false,
+          message: 'Validierungsfehler',
+          errors: errors.array()
         });
+      }
     }
     next();
-};
+  }
 
-// Auth validations
-const validateLogin = [
-    body('email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Bitte geben Sie eine gültige E-Mail-Adresse ein'),
-    body('password')
-        .notEmpty()
-        .withMessage('Passwort ist erforderlich'),
-    validate
-];
+  // Login Validierung
+  validateLogin() {
+    if (hasExpressValidator) {
+      return [
+        body('email')
+          .isEmail()
+          .normalizeEmail()
+          .withMessage('Gültige E-Mail-Adresse erforderlich'),
+        body('password')
+          .notEmpty()
+          .withMessage('Passwort erforderlich'),
+        this.handleValidationErrors
+      ];
+    }
+    
+    // Fallback ohne express-validator
+    return [(req, res, next) => {
+      const { email, password } = req.body;
+      const errors = [];
 
-const validateRegister = [
-    body('email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Bitte geben Sie eine gültige E-Mail-Adresse ein'),
-    body('password')
-        .isLength({ min: 6 })
-        .withMessage('Passwort muss mindestens 6 Zeichen lang sein')
-        .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-        .withMessage('Passwort muss mindestens einen Großbuchstaben, einen Kleinbuchstaben und eine Zahl enthalten'),
-    body('first_name')
-        .optional()
-        .trim()
-        .isLength({ min: 2, max: 100 })
-        .withMessage('Vorname muss zwischen 2 und 100 Zeichen lang sein'),
-    body('last_name')
-        .optional()
-        .trim()
-        .isLength({ min: 2, max: 100 })
-        .withMessage('Nachname muss zwischen 2 und 100 Zeichen lang sein'),
-    validate
-];
+      if (!email || !this.isValidEmail(email)) {
+        errors.push({ msg: 'Gültige E-Mail-Adresse erforderlich', path: 'email' });
+      }
+      if (!password) {
+        errors.push({ msg: 'Passwort erforderlich', path: 'password' });
+      }
 
-// Restaurant validations
-const validateCreateRestaurant = [
-    body('name')
-        .trim()
-        .notEmpty()
-        .withMessage('Restaurant Name ist erforderlich')
-        .isLength({ min: 2, max: 255 })
-        .withMessage('Name muss zwischen 2 und 255 Zeichen lang sein'),
-    body('google_reviews_url')
-        .trim()
-        .notEmpty()
-        .withMessage('Google Reviews URL ist erforderlich')
-        .isURL()
-        .withMessage('Bitte geben Sie eine gültige URL ein'),
-    body('owner_email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Bitte geben Sie eine gültige E-Mail-Adresse ein'),
-    body('owner_password')
-        .isLength({ min: 6 })
-        .withMessage('Passwort muss mindestens 6 Zeichen lang sein'),
-    validate
-];
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validierungsfehler',
+          errors
+        });
+      }
+      next();
+    }];
+  }
 
-const validateUpdateRestaurant = [
-    body('name')
-        .optional()
-        .trim()
-        .isLength({ min: 2, max: 255 })
-        .withMessage('Name muss zwischen 2 und 255 Zeichen lang sein'),
-    body('google_reviews_url')
-        .optional()
-        .trim()
-        .isURL()
-        .withMessage('Bitte geben Sie eine gültige URL ein'),
-    body('is_active')
-        .optional()
-        .isBoolean()
-        .withMessage('is_active muss ein Boolean sein'),
-    validate
-];
+  // Restaurant Registrierung
+  validateRestaurantRegistration() {
+    if (hasExpressValidator) {
+      return [
+        body('name')
+          .notEmpty()
+          .trim()
+          .isLength({ min: 2, max: 100 })
+          .withMessage('Restaurant-Name erforderlich (2-100 Zeichen)'),
+        body('email')
+          .isEmail()
+          .normalizeEmail()
+          .withMessage('Gültige E-Mail-Adresse erforderlich'),
+        body('password')
+          .isLength({ min: 6 })
+          .withMessage('Passwort muss mindestens 6 Zeichen lang sein'),
+        body('phone')
+          .optional()
+          .isMobilePhone('de-DE')
+          .withMessage('Gültige Telefonnummer erforderlich'),
+        this.handleValidationErrors
+      ];
+    }
 
-// Table validations
-const validateCreateTable = [
-    body('number')
-        .trim()
-        .notEmpty()
-        .withMessage('Tischnummer ist erforderlich')
-        .isLength({ max: 50 })
-        .withMessage('Tischnummer darf maximal 50 Zeichen lang sein'),
-    body('name')
-        .optional()
-        .trim()
-        .isLength({ max: 100 })
-        .withMessage('Name darf maximal 100 Zeichen lang sein'),
-    body('capacity')
-        .optional()
-        .isInt({ min: 1, max: 100 })
-        .withMessage('Kapazität muss zwischen 1 und 100 liegen'),
-    body('location')
-        .optional()
-        .isIn(['indoor', 'outdoor', 'terrace', 'bar', 'vip', 'other'])
-        .withMessage('Ungültiger Standorttyp'),
-    validate
-];
+    // Fallback
+    return [(req, res, next) => {
+      const { name, email, password, phone } = req.body;
+      const errors = [];
 
-// Subscription validations
-const validateCreateSubscription = [
-    body('restaurant_id')
-        .isUUID()
-        .withMessage('Ungültige Restaurant ID'),
-    body('plan_id')
-        .isUUID()
-        .withMessage('Ungültige Plan ID'),
-    body('billing_cycle')
-        .optional()
-        .isIn(['monthly', 'yearly', 'lifetime'])
-        .withMessage('Ungültiger Abrechnungszyklus'),
-    validate
-];
+      if (!name || name.length < 2 || name.length > 100) {
+        errors.push({ msg: 'Restaurant-Name erforderlich (2-100 Zeichen)', path: 'name' });
+      }
+      if (!email || !this.isValidEmail(email)) {
+        errors.push({ msg: 'Gültige E-Mail-Adresse erforderlich', path: 'email' });
+      }
+      if (!password || password.length < 6) {
+        errors.push({ msg: 'Passwort muss mindestens 6 Zeichen lang sein', path: 'password' });
+      }
+      if (phone && !this.isValidPhone(phone)) {
+        errors.push({ msg: 'Gültige Telefonnummer erforderlich', path: 'phone' });
+      }
 
-// Payment validations
-const validateCreatePayment = [
-    body('subscription_id')
-        .isUUID()
-        .withMessage('Ungültige Subscription ID'),
-    body('amount')
-        .isFloat({ min: 0 })
-        .withMessage('Betrag muss eine positive Zahl sein'),
-    body('payment_method')
-        .isIn(['manual', 'stripe', 'paypal', 'bank_transfer', 'cash', 'invoice'])
-        .withMessage('Ungültige Zahlungsmethode'),
-    validate
-];
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validierungsfehler',
+          errors
+        });
+      }
+      next();
+    }];
+  }
 
-// ID validations
-const validateUUID = (paramName = 'id') => [
-    param(paramName)
-        .isUUID()
-        .withMessage('Ungültige ID'),
-    validate
-];
+  // Tisch erstellen
+  validateTableCreation() {
+    if (hasExpressValidator) {
+      return [
+        body('table_number')
+          .isInt({ min: 1 })
+          .withMessage('Tischnummer muss eine positive Zahl sein'),
+        body('description')
+          .optional()
+          .trim()
+          .isLength({ max: 200 })
+          .withMessage('Beschreibung darf maximal 200 Zeichen lang sein'),
+        this.handleValidationErrors
+      ];
+    }
 
-// Pagination validations
-const validatePagination = [
-    query('page')
-        .optional()
-        .isInt({ min: 1 })
-        .withMessage('Seite muss eine positive Zahl sein'),
-    query('limit')
-        .optional()
-        .isInt({ min: 1, max: 100 })
-        .withMessage('Limit muss zwischen 1 und 100 liegen'),
-    query('sort')
-        .optional()
-        .isIn(['asc', 'desc', 'ASC', 'DESC'])
-        .withMessage('Sortierung muss asc oder desc sein'),
-    validate
-];
+    // Fallback
+    return [(req, res, next) => {
+      const { table_number, description } = req.body;
+      const errors = [];
 
-// Date range validations
-const validateDateRange = [
-    query('start_date')
-        .optional()
-        .isISO8601()
-        .withMessage('Startdatum muss im ISO 8601 Format sein'),
-    query('end_date')
-        .optional()
-        .isISO8601()
-        .withMessage('Enddatum muss im ISO 8601 Format sein')
-        .custom((value, { req }) => {
-            if (req.query.start_date && value) {
-                return new Date(value) >= new Date(req.query.start_date);
-            }
-            return true;
-        })
-        .withMessage('Enddatum muss nach dem Startdatum liegen'),
-    validate
-];
+      if (!table_number || table_number < 1 || !Number.isInteger(Number(table_number))) {
+        errors.push({ msg: 'Tischnummer muss eine positive Zahl sein', path: 'table_number' });
+      }
+      if (description && description.length > 200) {
+        errors.push({ msg: 'Beschreibung darf maximal 200 Zeichen lang sein', path: 'description' });
+      }
 
-// Bulk operations validations
-const validateBulkDelete = [
-    body('ids')
-        .isArray({ min: 1 })
-        .withMessage('IDs müssen ein Array mit mindestens einem Element sein'),
-    body('ids.*')
-        .isUUID()
-        .withMessage('Alle IDs müssen gültige UUIDs sein'),
-    validate
-];
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validierungsfehler',
+          errors
+        });
+      }
+      next();
+    }];
+  }
 
-// QR Code validations
-const validateQRCodeStyle = [
-    body('style.color')
-        .optional()
-        .matches(/^#[0-9A-F]{6}$/i)
-        .withMessage('Farbe muss ein gültiger Hex-Code sein'),
-    body('style.backgroundColor')
-        .optional()
-        .matches(/^#[0-9A-F]{6}$/i)
-        .withMessage('Hintergrundfarbe muss ein gültiger Hex-Code sein'),
-    body('style.width')
-        .optional()
-        .isInt({ min: 100, max: 1000 })
-        .withMessage('Breite muss zwischen 100 und 1000 Pixel liegen'),
-    validate
-];
+  // ID Parameter Validierung
+  validateIdParam() {
+    if (hasExpressValidator) {
+      return [
+        param('id')
+          .isInt()
+          .withMessage('Ungültige ID'),
+        this.handleValidationErrors
+      ];
+    }
 
-module.exports = {
-    validate,
-    validateLogin,
-    validateRegister,
-    validateCreateRestaurant,
-    validateUpdateRestaurant,
-    validateCreateTable,
-    validateCreateSubscription,
-    validateCreatePayment,
-    validateUUID,
-    validatePagination,
-    validateDateRange,
-    validateBulkDelete,
-    validateQRCodeStyle
-};
+    // Fallback
+    return [(req, res, next) => {
+      const { id } = req.params;
+      if (!id || !Number.isInteger(Number(id))) {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültige ID'
+        });
+      }
+      next();
+    }];
+  }
+
+  // Passwort ändern
+  validatePasswordChange() {
+    if (hasExpressValidator) {
+      return [
+        body('currentPassword')
+          .notEmpty()
+          .withMessage('Aktuelles Passwort erforderlich'),
+        body('newPassword')
+          .isLength({ min: 6 })
+          .withMessage('Neues Passwort muss mindestens 6 Zeichen lang sein'),
+        this.handleValidationErrors
+      ];
+    }
+
+    // Fallback
+    return [(req, res, next) => {
+      const { currentPassword, newPassword } = req.body;
+      const errors = [];
+
+      if (!currentPassword) {
+        errors.push({ msg: 'Aktuelles Passwort erforderlich', path: 'currentPassword' });
+      }
+      if (!newPassword || newPassword.length < 6) {
+        errors.push({ msg: 'Neues Passwort muss mindestens 6 Zeichen lang sein', path: 'newPassword' });
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validierungsfehler',
+          errors
+        });
+      }
+      next();
+    }];
+  }
+
+  // Hilfsmethoden für Fallback-Validierung
+  isValidEmail(email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  }
+
+  isValidPhone(phone) {
+    // Einfache deutsche Telefonnummer-Validierung
+    const phoneRegex = /^(\+49|0)[1-9]\d{1,14}$/;
+    return phoneRegex.test(phone.replace(/\s/g, ''));
+  }
+
+  // Generische Validierung für Updates
+  validateUpdate(fields) {
+    return (req, res, next) => {
+      const errors = [];
+      const data = req.body;
+
+      // Prüfe nur die angegebenen Felder
+      for (const field of fields) {
+        const value = data[field.name];
+        
+        if (field.required && !value) {
+          errors.push({ 
+            msg: `${field.label || field.name} ist erforderlich`, 
+            path: field.name 
+          });
+          continue;
+        }
+
+        if (value !== undefined && value !== null) {
+          // Typ-Validierung
+          if (field.type === 'email' && !this.isValidEmail(value)) {
+            errors.push({ 
+              msg: `${field.label || field.name} muss eine gültige E-Mail sein`, 
+              path: field.name 
+            });
+          }
+          
+          if (field.type === 'number' && isNaN(Number(value))) {
+            errors.push({ 
+              msg: `${field.label || field.name} muss eine Zahl sein`, 
+              path: field.name 
+            });
+          }
+          
+          // Längen-Validierung
+          if (field.minLength && value.length < field.minLength) {
+            errors.push({ 
+              msg: `${field.label || field.name} muss mindestens ${field.minLength} Zeichen lang sein`, 
+              path: field.name 
+            });
+          }
+          
+          if (field.maxLength && value.length > field.maxLength) {
+            errors.push({ 
+              msg: `${field.label || field.name} darf maximal ${field.maxLength} Zeichen lang sein`, 
+              path: field.name 
+            });
+          }
+        }
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validierungsfehler',
+          errors
+        });
+      }
+      
+      next();
+    };
+  }
+}
+
+module.exports = new ValidationMiddleware();
