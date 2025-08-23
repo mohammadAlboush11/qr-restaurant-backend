@@ -4,15 +4,23 @@ class EmailService {
   constructor() {
     this.transporter = null;
     this.isConfigured = false;
-    this.initTransporter();
+    // WICHTIG: Verzögerte Initialisierung für Environment Variables
+    setTimeout(() => {
+      this.initTransporter();
+    }, 100);
   }
 
-  initTransporter() {
+  async initTransporter() {
     try {
       if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
         console.log('⚠️  E-Mail-Service nicht konfiguriert (SMTP_USER oder SMTP_PASS fehlt)');
+        this.isConfigured = false;
         return;
       }
+
+      console.log('📧 Initialisiere E-Mail-Service...');
+      console.log('   SMTP_USER:', process.env.SMTP_USER);
+      console.log('   SMTP_HOST:', process.env.SMTP_HOST || 'smtp.strato.de');
 
       this.transporter = nodemailer.createTransporter({
         host: process.env.SMTP_HOST || 'smtp.strato.de',
@@ -27,27 +35,46 @@ class EmailService {
         }
       });
 
-      this.transporter.verify((error, success) => {
-        if (error) {
-          console.error('❌ E-Mail-Service Fehler:', error.message);
-          this.isConfigured = false;
-        } else {
-          console.log('✅ E-Mail-Service bereit');
-          this.isConfigured = true;
-        }
-      });
+      // WICHTIG: Warte auf Verifikation
+      try {
+        await this.transporter.verify();
+        console.log('✅ E-Mail-Service bereit und verifiziert!');
+        this.isConfigured = true;
+      } catch (verifyError) {
+        console.error('❌ E-Mail-Service Verifikation fehlgeschlagen:', verifyError.message);
+        console.error('   Prüfen Sie SMTP_USER und SMTP_PASS');
+        this.isConfigured = false;
+      }
     } catch (error) {
       console.error('❌ E-Mail-Service Initialisierung fehlgeschlagen:', error);
       this.isConfigured = false;
     }
   }
 
+  // Warte bis Service bereit ist
+  async waitForReady() {
+    if (this.isConfigured) return true;
+    
+    // Warte max. 5 Sekunden
+    for (let i = 0; i < 50; i++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (this.isConfigured) return true;
+    }
+    
+    return false;
+  }
+
   // NEUE METHODE: NUR für echte Bewertungen!
   async sendNewReviewNotification(restaurant, table, reviewData) {
     console.log(`🌟 Sende E-Mail für NEUE BEWERTUNG an ${restaurant.email}`);
 
-    if (!this.isConfigured || !this.transporter) {
-      console.error('❌ E-Mail-Service nicht konfiguriert');
+    // Warte bis Service bereit
+    const ready = await this.waitForReady();
+    
+    if (!ready || !this.transporter) {
+      console.error('❌ E-Mail-Service nicht bereit');
+      console.error('   isConfigured:', this.isConfigured);
+      console.error('   transporter:', !!this.transporter);
       return false;
     }
 
@@ -119,13 +146,6 @@ class EmailService {
                 font-weight: bold;
                 margin: 10px 0;
               }
-              .action-box {
-                background: #fff3cd;
-                border: 1px solid #ffc107;
-                padding: 15px;
-                border-radius: 5px;
-                margin: 20px 0;
-              }
               .button {
                 display: inline-block;
                 padding: 12px 30px;
@@ -150,7 +170,7 @@ class EmailService {
               <div class="header">
                 <h1 style="margin: 0;">🎉 Neue Google Bewertung!</h1>
                 <p style="margin: 10px 0 0 0; font-size: 18px;">
-                  Ihr Restaurant wurde bewertet
+                  ${restaurant.name} wurde bewertet
                 </p>
               </div>
               
@@ -175,18 +195,8 @@ class EmailService {
                 </div>
                 ` : ''}
                 
-                <div class="action-box">
-                  <strong>📌 Was sollten Sie jetzt tun?</strong>
-                  <ol style="margin: 10px 0; padding-left: 20px;">
-                    <li>Antworten Sie zeitnah auf die Bewertung bei Google</li>
-                    <li>Bedanken Sie sich beim Gast (falls noch vor Ort)</li>
-                    <li>Teilen Sie positive Bewertungen in Social Media</li>
-                    <li>Analysieren Sie Feedback für Verbesserungen</li>
-                  </ol>
-                </div>
-                
                 <div style="text-align: center;">
-                  <a href="${restaurant.google_business_url}" class="button">
+                  <a href="${restaurant.google_business_url || '#'}" class="button">
                     Bewertung bei Google ansehen →
                   </a>
                 </div>
@@ -203,19 +213,26 @@ class EmailService {
         `
       };
 
+      console.log('📨 Sende E-Mail...');
       const info = await this.transporter.sendMail(mailOptions);
-      console.log('✅ Bewertungs-E-Mail erfolgreich gesendet:', info.messageId);
+      console.log('✅ Bewertungs-E-Mail erfolgreich gesendet!');
+      console.log('   Message ID:', info.messageId);
+      console.log('   Response:', info.response);
       return true;
     } catch (error) {
-      console.error('❌ E-Mail Versand fehlgeschlagen:', error);
+      console.error('❌ E-Mail Versand fehlgeschlagen:', error.message);
+      console.error('   Code:', error.code);
+      console.error('   Command:', error.command);
       return false;
     }
   }
 
   // Test-E-Mail
   async sendTestEmail(to) {
-    if (!this.isConfigured || !this.transporter) {
-      console.error('❌ E-Mail-Service nicht konfiguriert');
+    const ready = await this.waitForReady();
+    
+    if (!ready || !this.transporter) {
+      console.error('❌ E-Mail-Service nicht bereit für Test');
       return false;
     }
 
@@ -236,12 +253,6 @@ class EmailService {
       console.error('❌ Test-E-Mail fehlgeschlagen:', error);
       return false;
     }
-  }
-
-  // DIESE METHODE NICHT MEHR VERWENDEN!
-  async sendReviewNotification() {
-    console.log('⚠️ DEPRECATED: sendReviewNotification sollte nicht mehr verwendet werden!');
-    return false;
   }
 }
 
