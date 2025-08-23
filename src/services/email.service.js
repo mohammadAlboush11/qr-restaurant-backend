@@ -18,11 +18,14 @@ class EmailService {
     this.transporter = null;
     this.isConfigured = false;
     this.initTransporter(); // sofort versuchen zu initialisieren
+
+    // 🔁 Rückwärtskompatibel: alter Methodenname als Alias
+    // (einige alte server.js rufen initializeTransporter() auf)
+    this.initializeTransporter = this.initTransporter.bind(this);
   }
 
   /**
    * Richtige Initialisierung (synchron).
-   * ACHTUNG: In server.js NICHT initializeTransporter() aufrufen – diese Methode heißt initTransporter().
    */
   initTransporter() {
     const {
@@ -37,6 +40,7 @@ class EmailService {
 
     if (!this.isConfigured) {
       console.warn("⚠️  E-Mail nicht konfiguriert (SMTP_* Variablen fehlen).");
+      this.transporter = null;
       return;
     }
 
@@ -47,11 +51,8 @@ class EmailService {
         secure:
           typeof SMTP_SECURE !== "undefined"
             ? String(SMTP_SECURE).toLowerCase() === "true"
-            : Number(SMTP_PORT) === 465, // Standard: Port 465 => secure
-        auth: {
-          user: SMTP_USER,
-          pass: SMTP_PASS,
-        },
+            : Number(SMTP_PORT) === 465,
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
       });
 
       console.log("📧 Initialisiere E-Mail-Service...");
@@ -102,8 +103,7 @@ class EmailService {
   }
 
   /**
-   * Bestehende Funktion (wurde bereits von dir verwendet)
-   * Erwartet üblicherweise: (toEmail, reviewData)
+   * Bereits existierender Versand: neue Bewertung
    */
   async sendNewReviewNotification(toEmail, reviewData = {}) {
     const subject = `⭐ Neue Bewertung erhalten`;
@@ -118,13 +118,13 @@ class EmailService {
   }
 
   /**
-   * Wrapper 1 – wird in deinen Services aufgerufen
-   * Akzeptiert zwei Formen:
+   * Wrapper 1 – von Services genutzt
+   * Formen:
    *  A) (toEmail, emailData)
    *  B) (restaurantObj, tableObj)
    */
   async sendScanNotification(arg1, arg2 = {}) {
-    // Form A: (toEmail, emailData)
+    // Form A
     if (typeof arg1 === "string") {
       const to = arg1;
       const d = arg2 || {};
@@ -138,7 +138,7 @@ class EmailService {
       return this.sendMail({ to, subject, html });
     }
 
-    // Form B: (restaurantObj, tableObj)
+    // Form B
     const restaurant = arg1 || {};
     const table = arg2 || {};
     const to =
@@ -158,8 +158,7 @@ class EmailService {
   }
 
   /**
-   * Wrapper 2 – wird in deinen Services aufgerufen
-   * Akzeptiert (toEmail, data) ODER (restaurantObj, data)
+   * Wrapper 2 – von Services genutzt
    */
   async sendReviewProbability(toOrRestaurant, data = {}) {
     const to =
@@ -183,7 +182,7 @@ class EmailService {
   }
 
   /**
-   * Nützlich für /health und Logs
+   * Statusausgabe
    */
   getStatus() {
     return {
