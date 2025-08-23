@@ -42,5 +42,5 @@ services:
         sync: false # WICHTIG: Manuell im Dashboard setzen!
         
       # Google Places API (Optional)
-      - key: AIzaSyCz7bB9ZCkwfMCLDt4CSOnVebRd4_u60pc
+      - key: GOOGLE_PLACES_API_KEY
         sync: false # Manuell im Dashboard setzen wenn vorhanden
