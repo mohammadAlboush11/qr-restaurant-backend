@@ -1,479 +1,347 @@
 /**
- * Restaurant Controller (for Restaurant Owners)
+ * Restaurant Controller - OHNE REDIS ABHÄNGIGKEIT
  * Speichern als: backend/src/controllers/restaurant/restaurant.controller.js
  */
 
-const { 
-    Restaurant, 
-    Subscription, 
-    Plan,
-    Table,
-    QRCode,
-    Scan,
-    ActivityLog 
-} = require('../../models');
-const { sequelize } = require('../../config/database');
-const { asyncHandler, AppError } = require('../../middleware/errorHandler');
-const { cache } = require('../../config/redis');
-const logger = require('../../utils/logger');
+const { Restaurant, Table, User } = require('../../models');
+const bcrypt = require('bcryptjs');
+const { Op } = require('sequelize');
 
-// Get restaurant dashboard
-const getDashboard = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
+// Optional Redis - wird nicht verwendet wenn nicht verfügbar
+let redisClient = null;
+try {
+  redisClient = require('../../config/redis');
+} catch (error) {
+  console.log('ℹ️ Redis nicht verfügbar - Cache deaktiviert');
+}
 
-    // Check cache first
-    const cacheKey = `restaurant:${restaurantId}:dashboard`;
-    const cached = await cache.get(cacheKey);
-    if (cached) {
-        return res.json({
-            success: true,
-            data: cached,
-            cached: true
+class RestaurantController {
+  // Dashboard Daten
+  async getDashboard(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+      
+      if (!restaurantId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Kein Restaurant zugeordnet'
         });
-    }
+      }
 
-    const restaurant = await Restaurant.findByPk(restaurantId, {
-        include: [
-            {
-                model: Subscription,
-                as: 'subscription',
-                include: [{
-                    model: Plan,
-                    as: 'plan'
-                }]
-            }
-        ]
-    });
+      const restaurant = await Restaurant.findByPk(restaurantId, {
+        include: [{
+          model: Table,
+          as: 'tables',
+          attributes: ['id', 'table_number', 'qr_code', 'scan_count']
+        }]
+      });
 
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
-    }
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant nicht gefunden'
+        });
+      }
 
-    // Get statistics
-    const [
-        totalTables,
-        activeTables,
-        totalScans,
-        todayScans,
-        weekScans,
-        monthScans,
-        topTables,
-        recentScans,
-        hourlyDistribution
-    ] = await Promise.all([
-        Table.count({ where: { restaurant_id: restaurantId } }),
-        
-        Table.count({ 
-            where: { 
-                restaurant_id: restaurantId,
-                is_active: true 
-            } 
-        }),
-        
-        Scan.count({ where: { restaurant_id: restaurantId } }),
-        
-        Scan.count({
-            where: {
-                restaurant_id: restaurantId,
-                created_at: {
-                    [sequelize.Op.gte]: new Date().setHours(0, 0, 0, 0)
-                }
-            }
-        }),
-        
-        Scan.count({
-            where: {
-                restaurant_id: restaurantId,
-                created_at: {
-                    [sequelize.Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-                }
-            }
-        }),
-        
-        Scan.count({
-            where: {
-                restaurant_id: restaurantId,
-                created_at: {
-                    [sequelize.Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-                }
-            }
-        }),
-        
-        Table.getTopPerformingTables(restaurantId, 5),
-        
-        Scan.findAll({
-            where: { restaurant_id: restaurantId },
-            order: [['created_at', 'DESC']],
-            limit: 10,
-            include: [{
-                model: Table,
-                as: 'table',
-                attributes: ['number', 'name']
-            }]
-        }),
-        
-        Scan.getHourlyDistribution(restaurantId, 7)
-    ]);
+      // Statistiken berechnen
+      const totalTables = restaurant.tables ? restaurant.tables.length : 0;
+      const totalScans = restaurant.tables 
+        ? restaurant.tables.reduce((sum, table) => sum + (table.scan_count || 0), 0)
+        : 0;
 
-    const dashboardData = {
-        restaurant: restaurant.toOwnerJSON(),
-        statistics: {
-            tables: {
-                total: totalTables,
-                active: activeTables,
-                inactive: totalTables - activeTables
-            },
-            scans: {
-                total: totalScans,
-                today: todayScans,
-                week: weekScans,
-                month: monthScans
-            },
-            topTables,
-            recentScans,
-            hourlyDistribution
+      // Dashboard-Daten
+      const dashboardData = {
+        restaurant: {
+          id: restaurant.id,
+          name: restaurant.name,
+          email: restaurant.email,
+          phone: restaurant.phone,
+          address: restaurant.address,
+          is_active: restaurant.is_active,
+          subscription_status: restaurant.subscription_status,
+          subscription_end_date: restaurant.subscription_end_date,
+          google_place_id: restaurant.google_place_id,
+          google_review_url: restaurant.google_review_url,
+          last_review_count: restaurant.last_review_count,
+          current_rating: restaurant.current_rating
         },
-        subscription: restaurant.subscription
-    };
+        statistics: {
+          total_tables: totalTables,
+          total_scans: totalScans,
+          active_tables: totalTables,
+          reviews_this_month: 0 // Könnte später implementiert werden
+        },
+        tables: restaurant.tables || []
+      };
 
-    // Cache for 5 minutes
-    await cache.set(cacheKey, dashboardData, 300);
-
-    res.json({
+      res.json({
         success: true,
         data: dashboardData
-    });
-});
+      });
 
-// Get restaurant details
-const getRestaurantDetails = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-
-    const restaurant = await Restaurant.findByPk(restaurantId, {
-        include: [
-            {
-                model: Subscription,
-                as: 'subscription',
-                include: [{
-                    model: Plan,
-                    as: 'plan'
-                }]
-            },
-            {
-                model: Table,
-                as: 'tables',
-                where: { is_active: true },
-                required: false
-            }
-        ]
-    });
-
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
+    } catch (error) {
+      console.error('Dashboard Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Laden des Dashboards'
+      });
     }
+  }
 
-    res.json({
-        success: true,
-        data: restaurant.toOwnerJSON()
-    });
-});
-
-// Update restaurant settings
-const updateRestaurant = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const updates = req.body;
-
-    const restaurant = await Restaurant.findByPk(restaurantId);
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
-    }
-
-    // Fields that restaurant owners can update
-    const allowedFields = [
-        'name', 'description', 'address', 'contact', 
-        'business_hours', 'logo_url', 'cover_image_url',
-        'theme_color', 'qr_code_style', 'settings'
-    ];
-
-    const filteredUpdates = {};
-    allowedFields.forEach(field => {
-        if (updates[field] !== undefined) {
-            filteredUpdates[field] = updates[field];
-        }
-    });
-
-    await restaurant.update({
-        ...filteredUpdates,
-        updated_by: req.user.id
-    });
-
-    // Invalidate cache
-    await cache.invalidateRestaurant(restaurantId);
-
-    // Log activity
-    await ActivityLog.logRestaurantAction(
-        req.user.id,
-        restaurantId,
-        'restaurant_settings_updated',
-        { updates: Object.keys(filteredUpdates) }
-    );
-
-    res.json({
-        success: true,
-        message: 'Einstellungen erfolgreich aktualisiert',
-        data: restaurant.toOwnerJSON()
-    });
-});
-
-// Get analytics
-const getAnalytics = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { 
-        start_date, 
-        end_date, 
-        period = '30days',
-        group_by = 'day'
-    } = req.query;
-
-    // Check cache
-    const cacheKey = `analytics:${restaurantId}:${period}:${group_by}`;
-    const cached = await cache.get(cacheKey);
-    if (cached) {
-        return res.json({
-            success: true,
-            data: cached,
-            cached: true
+  // Restaurant-Profil abrufen
+  async getProfile(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+      
+      const restaurant = await Restaurant.findByPk(restaurantId);
+      
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant nicht gefunden'
         });
-    }
+      }
 
-    // Build date filter
-    let dateFilter = {};
-    if (start_date && end_date) {
-        dateFilter = {
-            created_at: {
-                [sequelize.Op.between]: [new Date(start_date), new Date(end_date)]
-            }
-        };
-    } else {
-        const days = parseInt(period.replace('days', ''));
-        dateFilter = {
-            created_at: {
-                [sequelize.Op.gte]: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-            }
-        };
-    }
-
-    // Get various analytics
-    const [
-        scanTrend,
-        deviceStats,
-        tablePerformance,
-        peakHours,
-        uniqueVisitors,
-        conversionRate
-    ] = await Promise.all([
-        // Scan trend over time
-        Scan.findAll({
-            where: { restaurant_id: restaurantId, ...dateFilter },
-            attributes: [
-                [sequelize.fn('DATE', sequelize.col('created_at')), 'date'],
-                [sequelize.fn('COUNT', '*'), 'scans'],
-                [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('ip_address'))), 'unique_visitors']
-            ],
-            group: [sequelize.fn('DATE', sequelize.col('created_at'))],
-            order: [[sequelize.fn('DATE', sequelize.col('created_at')), 'ASC']]
-        }),
-
-        // Device statistics
-        Scan.getDeviceStats(restaurantId, 30),
-
-        // Table performance
-        Table.findAll({
-            where: { restaurant_id: restaurantId },
-            attributes: [
-                'id',
-                'number',
-                'name',
-                'total_scans',
-                'daily_scans',
-                'weekly_scans',
-                'monthly_scans'
-            ],
-            order: [['total_scans', 'DESC']]
-        }),
-
-        // Peak hours
-        Scan.getHourlyDistribution(restaurantId, 30),
-
-        // Unique visitors trend
-        Scan.findAll({
-            where: { 
-                restaurant_id: restaurantId, 
-                ...dateFilter,
-                is_unique: true 
-            },
-            attributes: [
-                [sequelize.fn('DATE', sequelize.col('created_at')), 'date'],
-                [sequelize.fn('COUNT', '*'), 'count']
-            ],
-            group: [sequelize.fn('DATE', sequelize.col('created_at'))],
-            order: [[sequelize.fn('DATE', sequelize.col('created_at')), 'ASC']]
-        }),
-
-        // Conversion rate (simplified - would need actual review tracking)
-        Scan.findAll({
-            where: { restaurant_id: restaurantId, ...dateFilter },
-            attributes: [
-                [sequelize.fn('DATE', sequelize.col('created_at')), 'date'],
-                [sequelize.fn('COUNT', '*'), 'total'],
-                [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('session_id'))), 'sessions']
-            ],
-            group: [sequelize.fn('DATE', sequelize.col('created_at'))]
-        })
-    ]);
-
-    const analyticsData = {
-        period: {
-            start: dateFilter.created_at?.[sequelize.Op.gte] || start_date,
-            end: dateFilter.created_at?.[sequelize.Op.lte] || end_date || new Date()
-        },
-        scanTrend,
-        deviceStats,
-        tablePerformance,
-        peakHours,
-        uniqueVisitors,
-        conversionRate,
-        summary: {
-            totalScans: scanTrend.reduce((sum, day) => sum + parseInt(day.dataValues.scans), 0),
-            totalUniqueVisitors: uniqueVisitors.reduce((sum, day) => sum + parseInt(day.dataValues.count), 0),
-            averageDaily: Math.round(scanTrend.reduce((sum, day) => sum + parseInt(day.dataValues.scans), 0) / scanTrend.length)
-        }
-    };
-
-    // Cache for 1 hour
-    await cache.set(cacheKey, analyticsData, 3600);
-
-    res.json({
-        success: true,
-        data: analyticsData
-    });
-});
-
-// Export analytics data
-const exportAnalytics = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { format = 'json', start_date, end_date } = req.query;
-
-    const restaurant = await Restaurant.findByPk(restaurantId);
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
-    }
-
-    // Build date filter
-    const dateFilter = {};
-    if (start_date) dateFilter[sequelize.Op.gte] = new Date(start_date);
-    if (end_date) dateFilter[sequelize.Op.lte] = new Date(end_date);
-
-    // Get all scans for export
-    const scans = await Scan.findAll({
-        where: {
-            restaurant_id: restaurantId,
-            ...(start_date || end_date ? { created_at: dateFilter } : {})
-        },
-        include: [{
-            model: Table,
-            as: 'table',
-            attributes: ['number', 'name']
-        }],
-        order: [['created_at', 'DESC']]
-    });
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: restaurantId,
-        action: 'analytics_exported',
-        category: 'restaurant',
-        metadata: { format, count: scans.length }
-    });
-
-    if (format === 'csv') {
-        const { Parser } = require('json2csv');
-        const fields = [
-            'id', 'table.number', 'table.name', 'device_type',
-            'browser', 'operating_system', 'country', 'city',
-            'created_at'
-        ];
-        const parser = new Parser({ fields });
-        const csv = parser.parse(scans.map(s => s.toJSON()));
-
-        res.header('Content-Type', 'text/csv');
-        res.header('Content-Disposition', `attachment; filename="analytics_${restaurantId}_${Date.now()}.csv"`);
-        return res.send(csv);
-    }
-
-    res.json({
+      res.json({
         success: true,
         data: {
-            restaurant: {
-                id: restaurant.id,
-                name: restaurant.name
-            },
-            period: {
-                start: start_date || 'all',
-                end: end_date || 'all'
-            },
-            count: scans.length,
-            scans
+          id: restaurant.id,
+          name: restaurant.name,
+          slug: restaurant.slug,
+          email: restaurant.email,
+          phone: restaurant.phone,
+          address: restaurant.address,
+          description: restaurant.description,
+          google_place_id: restaurant.google_place_id,
+          google_review_url: restaurant.google_review_url,
+          website: restaurant.website,
+          opening_hours: restaurant.opening_hours,
+          is_active: restaurant.is_active,
+          subscription_status: restaurant.subscription_status,
+          subscription_end_date: restaurant.subscription_end_date,
+          created_at: restaurant.created_at,
+          updated_at: restaurant.updated_at
         }
-    });
-});
+      });
 
-// Get subscription info
-const getSubscriptionInfo = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
+    } catch (error) {
+      console.error('Profil abrufen Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Abrufen des Profils'
+      });
+    }
+  }
 
-    const subscription = await Subscription.findOne({
-        where: { restaurant_id: restaurantId },
+  // Restaurant-Profil aktualisieren
+  async updateProfile(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+      const updates = req.body;
+      
+      // Felder die nicht aktualisiert werden dürfen
+      const protectedFields = ['id', 'user_id', 'subscription_status', 'subscription_end_date', 'is_active'];
+      protectedFields.forEach(field => delete updates[field]);
+
+      const restaurant = await Restaurant.findByPk(restaurantId);
+      
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant nicht gefunden'
+        });
+      }
+
+      // Restaurant aktualisieren
+      await restaurant.update(updates);
+
+      // Cache invalidieren wenn Redis verfügbar
+      if (redisClient && redisClient.isConnected()) {
+        await redisClient.del(`restaurant:${restaurantId}`);
+      }
+
+      res.json({
+        success: true,
+        message: 'Profil erfolgreich aktualisiert',
+        data: restaurant
+      });
+
+    } catch (error) {
+      console.error('Profil Update Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Aktualisieren des Profils'
+      });
+    }
+  }
+
+  // Passwort ändern
+  async changePassword(req, res) {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      const userId = req.user.id;
+
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Aktuelles und neues Passwort erforderlich'
+        });
+      }
+
+      // Benutzer mit Passwort laden
+      const user = await User.findByPk(userId);
+      
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer nicht gefunden'
+        });
+      }
+
+      // Aktuelles Passwort prüfen
+      const isValidPassword = await bcrypt.compare(currentPassword, user.password);
+      
+      if (!isValidPassword) {
+        return res.status(401).json({
+          success: false,
+          message: 'Aktuelles Passwort ist falsch'
+        });
+      }
+
+      // Neues Passwort hashen und speichern
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await user.update({ password: hashedPassword });
+
+      res.json({
+        success: true,
+        message: 'Passwort erfolgreich geändert'
+      });
+
+    } catch (error) {
+      console.error('Passwort ändern Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Ändern des Passworts'
+      });
+    }
+  }
+
+  // Restaurant-Statistiken
+  async getStatistics(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+      const { period = '7d' } = req.query;
+
+      // Zeitraum berechnen
+      let startDate = new Date();
+      switch(period) {
+        case '24h':
+          startDate.setHours(startDate.getHours() - 24);
+          break;
+        case '7d':
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+        case '30d':
+          startDate.setDate(startDate.getDate() - 30);
+          break;
+        case '90d':
+          startDate.setDate(startDate.getDate() - 90);
+          break;
+        default:
+          startDate.setDate(startDate.getDate() - 7);
+      }
+
+      // Basis-Statistiken abrufen
+      const restaurant = await Restaurant.findByPk(restaurantId, {
         include: [{
-            model: Plan,
-            as: 'plan'
+          model: Table,
+          as: 'tables'
         }]
-    });
+      });
 
-    if (!subscription) {
-        return res.json({
-            success: true,
-            data: {
-                hasSubscription: false,
-                message: 'Kein aktives Abonnement'
-            }
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant nicht gefunden'
         });
-    }
+      }
 
-    const daysRemaining = subscription.daysUntilExpiry();
-    const usagePercentage = {
-        tables: subscription.usage_stats.current_tables / subscription.plan.limits.max_tables * 100,
-        scans: subscription.usage_stats.total_scans_this_period / subscription.plan.limits.max_scans_per_month * 100
-    };
-
-    res.json({
-        success: true,
-        data: {
-            subscription,
-            daysRemaining,
-            usagePercentage,
-            isActive: subscription.isActive(),
-            isInTrial: subscription.isInTrial()
+      // Statistiken berechnen
+      const stats = {
+        period: period,
+        total_tables: restaurant.tables.length,
+        total_scans: restaurant.tables.reduce((sum, table) => sum + (table.scan_count || 0), 0),
+        average_scans_per_table: restaurant.tables.length > 0 
+          ? (restaurant.tables.reduce((sum, table) => sum + (table.scan_count || 0), 0) / restaurant.tables.length).toFixed(2)
+          : 0,
+        most_scanned_table: restaurant.tables.reduce((max, table) => 
+          (table.scan_count || 0) > (max.scan_count || 0) ? table : max, 
+          { table_number: 'N/A', scan_count: 0 }
+        ),
+        review_stats: {
+          total_reviews: restaurant.last_review_count || 0,
+          average_rating: restaurant.current_rating || 0
         }
-    });
-});
+      };
 
-module.exports = {
-    getDashboard,
-    getRestaurantDetails,
-    updateRestaurant,
-    getAnalytics,
-    exportAnalytics,
-    getSubscriptionInfo
-};
+      res.json({
+        success: true,
+        data: stats
+      });
+
+    } catch (error) {
+      console.error('Statistiken Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Abrufen der Statistiken'
+      });
+    }
+  }
+
+  // Google Places ID setzen/aktualisieren
+  async updateGooglePlaceId(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+      const { google_place_id, google_review_url } = req.body;
+
+      if (!google_place_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Google Place ID erforderlich'
+        });
+      }
+
+      const restaurant = await Restaurant.findByPk(restaurantId);
+      
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant nicht gefunden'
+        });
+      }
+
+      await restaurant.update({
+        google_place_id,
+        google_review_url: google_review_url || restaurant.google_review_url
+      });
+
+      res.json({
+        success: true,
+        message: 'Google Place ID erfolgreich aktualisiert',
+        data: {
+          google_place_id: restaurant.google_place_id,
+          google_review_url: restaurant.google_review_url
+        }
+      });
+
+    } catch (error) {
+      console.error('Google Place ID Update Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Aktualisieren der Google Place ID'
+      });
+    }
+  }
+}
+
+module.exports = new RestaurantController();
