@@ -1,9 +1,4 @@
-﻿/**
- * Server.js - Korrigierte Version
- * Speichern als: backend/server.js
- */
-
-const express = require('express');
+﻿const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
@@ -14,7 +9,7 @@ const adminRoutes = require('./src/routes/admin.routes');
 const restaurantRoutes = require('./src/routes/restaurant.routes');
 const publicRoutes = require('./src/routes/public.routes');
 
-// WICHTIG: NUR Review Monitor Service importieren (NICHT scan-notification!)
+// WICHTIG: Review Monitor Service importieren
 const reviewMonitor = require('./src/services/review-monitor.service');
 
 const app = express();
@@ -27,9 +22,10 @@ const corsOptions = {
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
-      'https://lt-express.de',
-      'https://www.lt-express.de',
+      'http://lt-express.de',
+      'http://www.lt-express.de',
       'https://qr-restaurant-managment.onrender.com',
+      'https://qr-restaurant-backend.onrender.com',
       'http://localhost:3000',
       'http://localhost:3001'
     ];
@@ -65,18 +61,35 @@ app.get('/', (req, res) => {
     message: 'QR Restaurant API', 
     version: '1.0.0',
     status: 'running',
+    timestamp: new Date(),
     services: {
       database: 'connected',
       email: process.env.SMTP_USER ? 'configured' : 'not configured',
       googleAPI: process.env.GOOGLE_PLACES_API_KEY ? 'configured' : 'not configured',
-      reviewMonitor: reviewMonitor.isRunning ? 'running' : 'stopped'
+      reviewMonitor: reviewMonitor.isRunning ? 'running' : 'stopped',
+      backendUrl: process.env.BACKEND_URL || 'not set',
+      environment: process.env.NODE_ENV || 'development'
+    }
+  });
+});
+
+// API Status endpoint
+app.get('/api', (req, res) => {
+  res.json({ 
+    message: 'API is running',
+    version: '1.0.0',
+    endpoints: {
+      auth: '/api/auth',
+      admin: '/api/admin',
+      restaurant: '/api/restaurant',
+      public: '/api/public'
     }
   });
 });
 
 // Error Handler
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Error:', err.stack);
   res.status(500).json({ 
     message: 'Etwas ist schief gelaufen!',
     error: process.env.NODE_ENV === 'development' ? err.message : {}
@@ -87,6 +100,13 @@ app.use((err, req, res, next) => {
 async function startServer() {
   try {
     console.log('🚀 Starte QR Restaurant System...');
+    console.log('================================');
+    
+    // Environment Check
+    console.log('📋 Environment Check:');
+    console.log(`   NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`   PORT: ${PORT}`);
+    console.log(`   BACKEND_URL: ${process.env.BACKEND_URL || 'nicht gesetzt'}`);
     console.log('================================');
     
     // Datenbankverbindung testen
@@ -113,33 +133,36 @@ async function startServer() {
         is_active: true
       });
       console.log(`✅ Super-Admin erstellt: ${adminEmail}`);
+      console.log('⚠️  WICHTIG: Bitte ändern Sie das Admin-Passwort nach dem ersten Login!');
     } else {
       console.log('✅ Admin-Account vorhanden');
     }
     
     // E-Mail Service Status
-    console.log('✅ E-Mail-Service konfiguriert');
-    console.log(`   SMTP-Host: ${process.env.SMTP_HOST || 'nicht konfiguriert'}`);
-    console.log(`   SMTP-User: ${process.env.SMTP_USER || 'nicht konfiguriert'}`);
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      console.log('✅ E-Mail-Service konfiguriert');
+      console.log(`   SMTP-Host: ${process.env.SMTP_HOST || 'smtp.strato.de'}`);
+      console.log(`   SMTP-User: ${process.env.SMTP_USER}`);
+    } else {
+      console.log('⚠️  E-Mail-Service NICHT konfiguriert');
+      console.log('   SMTP_USER oder SMTP_PASS fehlt in .env');
+    }
     
-    // WICHTIG: Review Monitor starten
+    console.log('================================');
+    
+    // WICHTIG: Review Monitor starten (nur wenn Google API Key vorhanden)
     if (process.env.GOOGLE_PLACES_API_KEY) {
       reviewMonitor.startMonitoring();
-      console.log('✅ Google Review Monitoring gestartet');
-      console.log('   Prüfintervall: 2 Minuten');
-      console.log('   ⚠️  E-Mails NUR bei echten Google-Bewertungen');
-      console.log('   ❌ KEINE E-Mails bei QR-Code Scans');
+      console.log('✅ Google Review Monitoring AKTIV');
+      console.log('   ✅ E-Mails NUR bei neuen Bewertungen');
+      console.log('   ❌ KEINE E-Mails bei QR-Scans');
+      console.log('   ⏱️  Prüfintervall: 60 Sekunden');
+      console.log('   🔍 Überwacht alle Restaurants mit Place ID');
     } else {
-      console.log('❌ KRITISCHER FEHLER: Google Review Monitoring NICHT aktiv!');
-      console.log('   Grund: GOOGLE_PLACES_API_KEY fehlt in .env');
-      console.log('   LÖSUNG: Google Places API Key hier erstellen:');
-      console.log('   https://developers.google.com/maps/documentation/places/web-service/get-api-key');
-      console.log('');
-      console.log('   OHNE API KEY:');
-      console.log('   ❌ Keine Erkennung echter Bewertungen');
-      console.log('   ❌ Keine E-Mail-Benachrichtigungen');
-      console.log('   ✅ QR-Codes funktionieren weiterhin');
-      console.log('   ✅ Weiterleitung zu Google Reviews funktioniert');
+      console.log('⚠️  Google Review Monitoring DEAKTIVIERT');
+      console.log('   ❌ Grund: GOOGLE_PLACES_API_KEY fehlt in .env');
+      console.log('   ❌ KEINE automatischen E-Mails möglich');
+      console.log('   ℹ️  Fügen Sie Google API Key hinzu für Review-Erkennung');
     }
     
     console.log('================================');
@@ -152,19 +175,21 @@ async function startServer() {
       console.log('================================');
       
       if (process.env.GOOGLE_PLACES_API_KEY) {
-        console.log('📌 AKTIVE FUNKTIONEN:');
-        console.log('   ✅ Erkennung echter Google-Bewertungen');
-        console.log('   ✅ E-Mail NUR bei neuen Bewertungen');
-        console.log('   ✅ Autor und Bewertungstext in E-Mail');
-        console.log('   ✅ Vermutete Tisch-Zuordnung');
+        console.log('📌 System-Verhalten MIT Google API:');
+        console.log('   1. QR-Code Scan → Tracking (keine E-Mail)');
+        console.log('   2. Google prüft alle 60 Sekunden auf neue Reviews');
+        console.log('   3. Neue Review gefunden → E-Mail an Restaurant');
+        console.log('   4. E-Mail enthält: Autor, Rating, Text der Review');
       } else {
-        console.log('📌 EINGESCHRÄNKTER MODUS (ohne Google API):');
-        console.log('   ✅ QR-Code Scans werden getrackt');
-        console.log('   ❌ KEINE E-Mails bei Scans');
-        console.log('   ❌ KEINE Erkennung echter Bewertungen');
-        console.log('   ✅ Weiterleitung zu Google Reviews funktioniert');
+        console.log('📌 System-Verhalten OHNE Google API:');
+        console.log('   1. QR-Code Scan → nur Weiterleitung');
+        console.log('   2. Keine Review-Erkennung möglich');
+        console.log('   3. Keine automatischen E-Mails');
       }
       console.log('================================');
+      
+      // Statistiken anzeigen
+      showStartupStats();
     });
   } catch (error) {
     console.error('❌ Server Start Fehler:', error);
@@ -172,19 +197,68 @@ async function startServer() {
   }
 }
 
+// Startup Statistiken
+async function showStartupStats() {
+  try {
+    const { User, Restaurant, Table } = require('./src/models');
+    
+    const userCount = await User.count();
+    const restaurantCount = await Restaurant.count();
+    const tableCount = await Table.count();
+    const activeRestaurants = await Restaurant.count({ where: { is_active: true } });
+    
+    console.log('📊 System-Statistiken:');
+    console.log(`   Benutzer: ${userCount}`);
+    console.log(`   Restaurants: ${restaurantCount} (${activeRestaurants} aktiv)`);
+    console.log(`   Tische/QR-Codes: ${tableCount}`);
+    console.log('================================');
+  } catch (error) {
+    console.error('Statistik-Fehler:', error.message);
+  }
+}
+
 // Graceful Shutdown
 process.on('SIGTERM', async () => {
-  console.log('⏹️ SIGTERM empfangen, fahre herunter...');
-  reviewMonitor.stopMonitoring();
+  console.log('⏹️  SIGTERM empfangen, fahre herunter...');
+  
+  // Review Monitor stoppen
+  if (reviewMonitor.isRunning) {
+    reviewMonitor.stopMonitoring();
+    console.log('   Review Monitor gestoppt');
+  }
+  
+  // Datenbankverbindung schließen
   await sequelize.close();
+  console.log('   Datenbank geschlossen');
+  
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-  console.log('⏹️ SIGINT empfangen, fahre herunter...');
-  reviewMonitor.stopMonitoring();
+  console.log('⏹️  SIGINT empfangen, fahre herunter...');
+  
+  // Review Monitor stoppen
+  if (reviewMonitor.isRunning) {
+    reviewMonitor.stopMonitoring();
+    console.log('   Review Monitor gestoppt');
+  }
+  
+  // Datenbankverbindung schließen
   await sequelize.close();
+  console.log('   Datenbank geschlossen');
+  
   process.exit(0);
+});
+
+// Unhandled Rejection Handler
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Uncaught Exception Handler
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
 });
 
 // Server starten

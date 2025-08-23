@@ -10,7 +10,7 @@ const emailService = require('./email.service');
 
 class QRCodeService {
     /**
-     * Erstelle QR-Code für Tisch
+     * Erstelle QR-Code fÃ¼r Tisch
      */
     async createQRCode(tableId, restaurantId, userId) {
         try {
@@ -47,7 +47,7 @@ class QRCodeService {
                 created_by: userId
             });
             
-            console.log(`✅ QR-Code erstellt für ${restaurant.name} - Tisch ${table.number}`);
+            console.log(`âœ… QR-Code erstellt fÃ¼r ${restaurant.name} - Tisch ${table.number}`);
             console.log(`   Tracking URL: ${trackingUrl}`);
             
             return qrCode;
@@ -81,7 +81,7 @@ class QRCodeService {
             });
             
             if (!qrCode) {
-                console.log(`⚠️ QR-Code nicht gefunden: ${token}`);
+                console.log(`âš ï¸ QR-Code nicht gefunden: ${token}`);
                 return {
                     success: false,
                     redirectUrl: this.getFallbackUrl()
@@ -131,7 +131,7 @@ class QRCodeService {
         await qrCode.increment('scan_count');
         await qrCode.update({ last_scan_at: new Date() });
         
-        console.log(`📊 Scan #${qrCode.scan_count + 1} für ${qrCode.restaurant.name} - Tisch ${qrCode.table.number}`);
+        console.log(`ðŸ“Š Scan #${qrCode.scan_count + 1} fÃ¼r ${qrCode.restaurant.name} - Tisch ${qrCode.table.number}`);
         
         return scan;
     }
@@ -161,7 +161,7 @@ class QRCodeService {
      * Plane Follow-up Check
      */
     scheduleFollowUp(qrCode, scan) {
-        // Nach 5 Minuten prüfen
+        // Nach 5 Minuten prÃ¼fen
         setTimeout(async () => {
             await emailService.sendReviewProbability(
                 qrCode.restaurant.settings?.notification_email || environment.EMAIL_CONFIG.notificationEmail,

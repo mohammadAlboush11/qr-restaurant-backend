@@ -32,8 +32,8 @@ class GoogleReviewsService {
             this.checkForNewScans();
         }, this.checkInterval);
 
-        logger.info('✅ Google Review Monitoring gestartet');
-        logger.info(`   Prüfintervall: ${this.checkInterval / 60000} Minuten`);
+        logger.info('âœ… Google Review Monitoring gestartet');
+        logger.info(`   PrÃ¼fintervall: ${this.checkInterval / 60000} Minuten`);
         logger.info('   E-Mails nur bei neuen Scans (nicht bei QR-Erstellung)');
     }
 
@@ -48,7 +48,7 @@ class GoogleReviewsService {
     }
 
     /**
-     * Prüft auf neue Scans und sendet E-Mails
+     * PrÃ¼ft auf neue Scans und sendet E-Mails
      */
     async checkForNewScans() {
         try {
@@ -94,7 +94,7 @@ class GoogleReviewsService {
                 this.scheduleFollowUp(scan);
             }
 
-            // Bereinige alte processedScans (älter als 1 Stunde)
+            // Bereinige alte processedScans (Ã¤lter als 1 Stunde)
             if (this.processedScans.size > 100) {
                 this.processedScans.clear();
             }
@@ -105,14 +105,14 @@ class GoogleReviewsService {
     }
 
     /**
-     * Sendet E-Mail-Benachrichtigung für neuen Scan
+     * Sendet E-Mail-Benachrichtigung fÃ¼r neuen Scan
      */
     async sendScanNotification(scan) {
         try {
             const restaurant = scan.restaurant;
             const table = scan.table;
             
-            // Bestimme E-Mail-Empfänger
+            // Bestimme E-Mail-EmpfÃ¤nger
             const recipientEmail = restaurant.contact?.email || 
                                  restaurant.owner?.email || 
                                  process.env.NOTIFICATION_EMAIL || 
@@ -131,7 +131,7 @@ class GoogleReviewsService {
             // Sende E-Mail
             await emailService.sendScanNotification(recipientEmail, emailData);
             
-            logger.info(`📧 Scan-Benachrichtigung gesendet an ${recipientEmail} für Tisch ${emailData.table_number}`);
+            logger.info(`ðŸ“§ Scan-Benachrichtigung gesendet an ${recipientEmail} fÃ¼r Tisch ${emailData.table_number}`);
 
             // Log Activity
             await ActivityLog.create({
@@ -176,7 +176,7 @@ class GoogleReviewsService {
                 // Sende Follow-up E-Mail
                 await emailService.sendReviewProbability(recipientEmail, emailData);
                 
-                logger.info(`📧 Follow-up E-Mail gesendet für Tisch ${emailData.table_number}`);
+                logger.info(`ðŸ“§ Follow-up E-Mail gesendet fÃ¼r Tisch ${emailData.table_number}`);
 
             } catch (error) {
                 logger.error('Error sending follow-up email:', error);
@@ -194,7 +194,7 @@ class GoogleReviewsService {
     }
 
     /**
-     * Manuelle Prüfung für ein Restaurant (Admin-Funktion)
+     * Manuelle PrÃ¼fung fÃ¼r ein Restaurant (Admin-Funktion)
      */
     async manualCheck(restaurantId) {
         try {

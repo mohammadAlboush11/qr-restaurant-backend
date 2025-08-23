@@ -8,7 +8,7 @@ class ScanNotificationService {
     this.scanCooldown = 5 * 60 * 1000; // 5 Minuten Cooldown pro Tisch
   }
 
-  // Prüft ob kürzlich gescannt wurde (Spam-Schutz)
+  // PrÃ¼ft ob kÃ¼rzlich gescannt wurde (Spam-Schutz)
   isRecentScan(tableId) {
     const lastScan = this.recentScans.get(tableId);
     if (!lastScan) return false;
@@ -29,11 +29,11 @@ class ScanNotificationService {
         return false;
       }
 
-      // Scan Count erhöhen
+      // Scan Count erhÃ¶hen
       table.scan_count = (table.scan_count || 0) + 1;
       await table.save();
 
-      // Spam-Schutz: Nur E-Mail senden wenn nicht kürzlich gescannt
+      // Spam-Schutz: Nur E-Mail senden wenn nicht kÃ¼rzlich gescannt
       if (!this.isRecentScan(tableId)) {
         // Scan Zeit speichern
         this.recentScans.set(tableId, Date.now());
@@ -58,23 +58,23 @@ class ScanNotificationService {
         if (emailSent) {
           notification.notification_sent = true;
           await notification.save();
-          console.log(`✅ E-Mail gesendet für Tisch ${table.table_number} an ${table.Restaurant.email}`);
+          console.log(`âœ… E-Mail gesendet fÃ¼r Tisch ${table.table_number} an ${table.Restaurant.email}`);
         }
       } else {
-        console.log(`⏭️ Tisch ${table.table_number} wurde kürzlich gescannt - keine E-Mail (Spam-Schutz)`);
+        console.log(`â­ï¸ Tisch ${table.table_number} wurde kÃ¼rzlich gescannt - keine E-Mail (Spam-Schutz)`);
       }
 
-      // Alte Einträge aufräumen
+      // Alte EintrÃ¤ge aufrÃ¤umen
       this.cleanupOldScans();
 
       return true;
     } catch (error) {
-      console.error('❌ QR Scan Handler Error:', error);
+      console.error('âŒ QR Scan Handler Error:', error);
       return false;
     }
   }
 
-  // Alte Scans aufräumen
+  // Alte Scans aufrÃ¤umen
   cleanupOldScans() {
     const oneHourAgo = Date.now() - (60 * 60 * 1000);
     for (const [tableId, timestamp] of this.recentScans.entries()) {
