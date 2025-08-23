@@ -2,10 +2,14 @@ services:
   - type: web
     name: qr-restaurant-backend
     env: node
-    buildCommand: npm install
+    buildCommand: |
+      echo "Installing dependencies..." &&
+      npm install &&
+      npm install nodemailer@6.9.7 pdfkit@0.14.0 qrcode@1.5.3 --save &&
+      npm list --depth=0
     startCommand: node server.js
     envVars:
-      # Server
+      # Server Configuration
       - key: NODE_ENV
         value: production
       - key: PORT
@@ -17,11 +21,11 @@ services:
       - key: DATABASE_PATH
         value: ./database.sqlite
         
-      # JWT (automatisch generiert)
+      # JWT Secret (auto-generated)
       - key: JWT_SECRET
         generateValue: true
         
-      # Frontend
+      # Frontend URL
       - key: FRONTEND_URL
         value: http://lt-express.de
         
@@ -29,9 +33,9 @@ services:
       - key: ADMIN_EMAIL
         value: admin@lt-express.de
       - key: ADMIN_PASSWORD
-        sync: false # Manuell im Dashboard setzen für Sicherheit
+        sync: false # Set manually in dashboard for security
         
-      # SMTP (Strato)
+      # SMTP Configuration (Strato)
       - key: SMTP_HOST
         value: smtp.strato.de
       - key: SMTP_PORT
@@ -39,8 +43,12 @@ services:
       - key: SMTP_USER
         value: info@cleanovio.de
       - key: SMTP_PASS
-        sync: false # WICHTIG: Manuell im Dashboard setzen!
+        sync: false # IMPORTANT: Set manually in dashboard!
         
       # Google Places API (Optional)
       - key: GOOGLE_PLACES_API_KEY
-        sync: false # Manuell im Dashboard setzen wenn vorhanden
+        sync: false # Set manually if available
+        
+      # Additional Settings
+      - key: SEND_TEST_EMAIL
+        value: false # Set to true to send test email on startup

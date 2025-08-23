@@ -1,554 +1,450 @@
 /**
- * QR Code Controller
+ * QR Code Controller - MIT OPTIONALEM PDFKIT
  * Speichern als: backend/src/controllers/restaurant/qrcode.controller.js
  */
 
-const { 
-    QRCode, 
-    Table, 
-    Restaurant,
-    Scan,
-    ActivityLog 
-} = require('../../models');
-const { asyncHandler, AppError } = require('../../middleware/errorHandler');
-const QRCodeLib = require('qrcode');
-const PDFDocument = require('pdfkit');
-const fs = require('fs').promises;
+const QRCode = require('qrcode');
+const { Table, Restaurant } = require('../../models');
 const path = require('path');
-const archiver = require('archiver');
-const logger = require('../../utils/logger');
+const fs = require('fs').promises;
 
-// Get all QR codes
-const getAllQRCodes = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { is_active } = req.query;
+// PDFKit optional laden
+let PDFDocument;
+try {
+  PDFDocument = require('pdfkit');
+  console.log('✅ PDFKit geladen - PDF Export verfügbar');
+} catch (error) {
+  console.log('⚠️ PDFKit nicht verfügbar - PDF Export deaktiviert');
+  PDFDocument = null;
+}
 
-    const where = { restaurant_id: restaurantId };
-    if (is_active !== undefined) where.is_active = is_active === 'true';
+class QRCodeController {
+  // QR-Code für einen Tisch generieren
+  async generateQRCode(req, res) {
+    try {
+      const { tableId } = req.params;
+      const restaurantId = req.user.restaurant_id;
 
-    const qrCodes = await QRCode.findAll({
-        where,
+      const table = await Table.findOne({
+        where: { 
+          id: tableId,
+          restaurant_id: restaurantId
+        },
         include: [{
-            model: Table,
-            as: 'table',
-            attributes: ['id', 'number', 'name', 'location']
-        }],
-        order: [['created_at', 'DESC']]
-    });
+          model: Restaurant,
+          as: 'restaurant'
+        }]
+      });
 
-    res.json({
+      if (!table) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tisch nicht gefunden'
+        });
+      }
+
+      // QR-Code Daten
+      const trackingUrl = `${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}/api/public/track/${table.tracking_token}`;
+      
+      // QR-Code als Data URL generieren
+      const qrCodeDataUrl = await QRCode.toDataURL(trackingUrl, {
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+        width: 300,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        }
+      });
+
+      // QR-Code in Datenbank speichern
+      await table.update({ 
+        qr_code: qrCodeDataUrl,
+        qr_code_url: trackingUrl
+      });
+
+      res.json({
         success: true,
+        data: {
+          table_id: table.id,
+          table_number: table.table_number,
+          qr_code: qrCodeDataUrl,
+          tracking_url: trackingUrl
+        }
+      });
+
+    } catch (error) {
+      console.error('QR-Code Generierung Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Generieren des QR-Codes'
+      });
+    }
+  }
+
+  // Alle QR-Codes für ein Restaurant generieren
+  async generateAllQRCodes(req, res) {
+    try {
+      const restaurantId = req.user.restaurant_id;
+
+      const tables = await Table.findAll({
+        where: { restaurant_id: restaurantId },
+        include: [{
+          model: Restaurant,
+          as: 'restaurant'
+        }]
+      });
+
+      if (tables.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Keine Tische gefunden'
+        });
+      }
+
+      const qrCodes = [];
+      
+      for (const table of tables) {
+        const trackingUrl = `${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}/api/public/track/${table.tracking_token}`;
+        
+        const qrCodeDataUrl = await QRCode.toDataURL(trackingUrl, {
+          errorCorrectionLevel: 'M',
+          type: 'image/png',
+          width: 300,
+          margin: 2
+        });
+
+        await table.update({ 
+          qr_code: qrCodeDataUrl,
+          qr_code_url: trackingUrl
+        });
+
+        qrCodes.push({
+          table_id: table.id,
+          table_number: table.table_number,
+          qr_code: qrCodeDataUrl,
+          tracking_url: trackingUrl
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `${qrCodes.length} QR-Codes generiert`,
         data: qrCodes
-    });
-});
+      });
 
-// Get single QR code
-const getQRCode = asyncHandler(async (req, res) => {
-    const { restaurantId, qrCodeId } = req.params;
+    } catch (error) {
+      console.error('Batch QR-Code Generierung Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Generieren der QR-Codes'
+      });
+    }
+  }
 
-    const qrCode = await QRCode.findOne({
-        where: {
-            id: qrCodeId,
-            restaurant_id: restaurantId
+  // QR-Code als Bild herunterladen
+  async downloadQRCode(req, res) {
+    try {
+      const { tableId } = req.params;
+      const { format = 'png' } = req.query;
+      const restaurantId = req.user.restaurant_id;
+
+      const table = await Table.findOne({
+        where: { 
+          id: tableId,
+          restaurant_id: restaurantId
         },
         include: [{
-            model: Table,
-            as: 'table'
+          model: Restaurant,
+          as: 'restaurant'
         }]
-    });
+      });
 
-    if (!qrCode) {
-        throw new AppError('QR-Code nicht gefunden', 404);
-    }
-
-    // Get analytics
-    const analytics = await qrCode.getAnalytics(30);
-
-    res.json({
-        success: true,
-        data: {
-            qrCode,
-            analytics
-        }
-    });
-});
-
-// Generate QR code for table
-const generateQRCode = asyncHandler(async (req, res) => {
-    const { restaurantId, tableId } = req.params;
-    const { style = {} } = req.body;
-
-    const table = await Table.findOne({
-        where: {
-            id: tableId,
-            restaurant_id: restaurantId
-        }
-    });
-
-    if (!table) {
-        throw new AppError('Tisch nicht gefunden', 404);
-    }
-
-    // Check if QR code already exists
-    let qrCode = await QRCode.findOne({
-        where: { table_id: tableId }
-    });
-
-    if (qrCode && qrCode.is_active) {
-        throw new AppError('QR-Code existiert bereits für diesen Tisch', 400);
-    }
-
-    // Generate new QR code or reactivate existing
-    if (qrCode) {
-        await qrCode.reactivate();
-    } else {
-        qrCode = await QRCode.generateForTable(tableId, restaurantId);
-    }
-
-    // Apply custom style if provided
-    if (Object.keys(style).length > 0) {
-        qrCode.style = { ...qrCode.style, ...style };
-        await qrCode.save();
-        await qrCode.generateImageData();
-    }
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: restaurantId,
-        action: 'qr_code_generated',
-        category: 'qrcode',
-        entity_type: 'QRCode',
-        entity_id: qrCode.id,
-        metadata: { table_number: table.number }
-    });
-
-    res.json({
-        success: true,
-        message: 'QR-Code erfolgreich generiert',
-        data: qrCode
-    });
-});
-
-// Regenerate QR code
-const regenerateQRCode = asyncHandler(async (req, res) => {
-    const { restaurantId, qrCodeId } = req.params;
-
-    const qrCode = await QRCode.findOne({
-        where: {
-            id: qrCodeId,
-            restaurant_id: restaurantId
-        },
-        include: [{
-            model: Table,
-            as: 'table'
-        }]
-    });
-
-    if (!qrCode) {
-        throw new AppError('QR-Code nicht gefunden', 404);
-    }
-
-    // Deactivate old QR code
-    await qrCode.deactivate();
-
-    // Generate new QR code
-    const newQRCode = await QRCode.generateForTable(qrCode.table_id, restaurantId);
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: restaurantId,
-        action: 'qr_code_regenerated',
-        category: 'qrcode',
-        entity_type: 'QRCode',
-        entity_id: newQRCode.id,
-        metadata: { 
-            old_token: qrCode.token,
-            new_token: newQRCode.token,
-            table_number: qrCode.table.number 
-        }
-    });
-
-    res.json({
-        success: true,
-        message: 'QR-Code erfolgreich neu generiert',
-        data: newQRCode
-    });
-});
-
-// Update QR code style
-const updateQRCodeStyle = asyncHandler(async (req, res) => {
-    const { restaurantId, qrCodeId } = req.params;
-    const { style } = req.body;
-
-    const qrCode = await QRCode.findOne({
-        where: {
-            id: qrCodeId,
-            restaurant_id: restaurantId
-        }
-    });
-
-    if (!qrCode) {
-        throw new AppError('QR-Code nicht gefunden', 404);
-    }
-
-    // Update style
-    qrCode.style = { ...qrCode.style, ...style };
-    qrCode.updated_by = req.user.id;
-    await qrCode.save();
-
-    // Regenerate image with new style
-    await qrCode.generateImageData();
-
-    res.json({
-        success: true,
-        message: 'QR-Code Style erfolgreich aktualisiert',
-        data: qrCode
-    });
-});
-
-// Download single QR code
-const downloadQRCode = asyncHandler(async (req, res) => {
-    const { restaurantId, qrCodeId } = req.params;
-    const { format = 'png', size = 512 } = req.query;
-
-    const qrCode = await QRCode.findOne({
-        where: {
-            id: qrCodeId,
-            restaurant_id: restaurantId
-        },
-        include: [{
-            model: Table,
-            as: 'table'
-        }]
-    });
-
-    if (!qrCode) {
-        throw new AppError('QR-Code nicht gefunden', 404);
-    }
-
-    const restaurant = await Restaurant.findByPk(restaurantId);
-
-    // Generate QR code image
-    const options = {
-        ...qrCode.style,
-        width: parseInt(size),
-        type: format,
-        margin: 2
-    };
-
-    if (format === 'svg') {
-        const svgString = await QRCodeLib.toString(qrCode.tracking_url, {
-            ...options,
-            type: 'svg'
+      if (!table) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tisch nicht gefunden'
         });
-        
-        res.header('Content-Type', 'image/svg+xml');
-        res.header('Content-Disposition', `attachment; filename="qr_${qrCode.table.number}.svg"`);
-        return res.send(svgString);
-    } else if (format === 'pdf') {
-        // Create PDF with QR code
-        const doc = new PDFDocument();
-        
-        res.header('Content-Type', 'application/pdf');
-        res.header('Content-Disposition', `attachment; filename="qr_${qrCode.table.number}.pdf"`);
-        
-        doc.pipe(res);
-        
-        // Add restaurant info
-        doc.fontSize(20).text(restaurant.name, { align: 'center' });
-        doc.fontSize(14).text(`Tisch ${qrCode.table.number}`, { align: 'center' });
-        doc.moveDown();
-        
-        // Add QR code
-        const qrBuffer = await QRCodeLib.toBuffer(qrCode.tracking_url, options);
-        doc.image(qrBuffer, {
-            fit: [400, 400],
-            align: 'center'
+      }
+
+      const trackingUrl = table.qr_code_url || `${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}/api/public/track/${table.tracking_token}`;
+
+      if (format === 'png') {
+        // PNG Format
+        const buffer = await QRCode.toBuffer(trackingUrl, {
+          errorCorrectionLevel: 'M',
+          type: 'image/png',
+          width: 500,
+          margin: 3
         });
-        
-        doc.moveDown();
-        doc.fontSize(10).text('Scannen Sie den QR-Code für Google Bewertungen', { align: 'center' });
-        
-        doc.end();
-        return;
-    } else {
-        // PNG format
-        const buffer = await QRCodeLib.toBuffer(qrCode.tracking_url, options);
-        
-        res.header('Content-Type', 'image/png');
-        res.header('Content-Disposition', `attachment; filename="qr_${qrCode.table.number}.png"`);
-        return res.send(buffer);
+
+        res.set({
+          'Content-Type': 'image/png',
+          'Content-Disposition': `attachment; filename="qr-tisch-${table.table_number}.png"`
+        });
+        res.send(buffer);
+
+      } else if (format === 'svg') {
+        // SVG Format
+        const svg = await QRCode.toString(trackingUrl, {
+          errorCorrectionLevel: 'M',
+          type: 'svg',
+          width: 500,
+          margin: 3
+        });
+
+        res.set({
+          'Content-Type': 'image/svg+xml',
+          'Content-Disposition': `attachment; filename="qr-tisch-${table.table_number}.svg"`
+        });
+        res.send(svg);
+
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültiges Format. Verwende png oder svg'
+        });
+      }
+
+    } catch (error) {
+      console.error('QR-Code Download Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Herunterladen des QR-Codes'
+      });
     }
-});
+  }
 
-// Download all QR codes as ZIP
-const downloadAllQRCodes = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { format = 'png', size = 512, include_pdf = false } = req.query;
+  // PDF mit allen QR-Codes generieren
+  async downloadAllQRCodesPDF(req, res) {
+    try {
+      // Prüfe ob PDFKit verfügbar ist
+      if (!PDFDocument) {
+        return res.status(503).json({
+          success: false,
+          message: 'PDF-Export ist derzeit nicht verfügbar. Bitte verwenden Sie den einzelnen QR-Code Download.'
+        });
+      }
 
-    const restaurant = await Restaurant.findByPk(restaurantId);
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
+      const restaurantId = req.user.restaurant_id;
+
+      const restaurant = await Restaurant.findByPk(restaurantId, {
+        include: [{
+          model: Table,
+          as: 'tables',
+          order: [['table_number', 'ASC']]
+        }]
+      });
+
+      if (!restaurant || restaurant.tables.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Keine Tische gefunden'
+        });
+      }
+
+      // PDF erstellen
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 50
+      });
+
+      // Response Headers
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="qr-codes-${restaurant.slug || restaurant.id}.pdf"`
+      });
+
+      // Pipe PDF to response
+      doc.pipe(res);
+
+      // PDF Header
+      doc.fontSize(24)
+         .text(restaurant.name, { align: 'center' })
+         .fontSize(14)
+         .text('QR-Codes für Google Bewertungen', { align: 'center' })
+         .moveDown(2);
+
+      // QR-Codes generieren (2 pro Zeile)
+      let xPos = 50;
+      let yPos = 150;
+      let count = 0;
+
+      for (const table of restaurant.tables) {
+        if (count > 0 && count % 2 === 0) {
+          xPos = 50;
+          yPos += 280;
+          
+          // Neue Seite wenn nötig
+          if (yPos > 600) {
+            doc.addPage();
+            yPos = 50;
+          }
+        }
+
+        const trackingUrl = table.qr_code_url || 
+          `${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}/api/public/track/${table.tracking_token}`;
+
+        // QR-Code als Buffer generieren
+        const qrBuffer = await QRCode.toBuffer(trackingUrl, {
+          errorCorrectionLevel: 'M',
+          type: 'image/png',
+          width: 200,
+          margin: 2
+        });
+
+        // QR-Code zum PDF hinzufügen
+        doc.image(qrBuffer, xPos, yPos, { width: 200, height: 200 });
+        
+        // Tischnummer
+        doc.fontSize(14)
+           .text(`Tisch ${table.table_number}`, xPos, yPos + 210, {
+             width: 200,
+             align: 'center'
+           });
+
+        xPos += 250;
+        count++;
+      }
+
+      // Footer
+      doc.fontSize(10)
+         .text(`Generiert am ${new Date().toLocaleDateString('de-DE')}`, 50, 750, {
+           align: 'center'
+         });
+
+      // PDF finalisieren
+      doc.end();
+
+    } catch (error) {
+      console.error('PDF Generierung Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Generieren der PDF'
+      });
     }
+  }
 
-    const qrCodes = await QRCode.findAll({
-        where: {
-            restaurant_id: restaurantId,
-            is_active: true
+  // QR-Code Vorschau
+  async previewQRCode(req, res) {
+    try {
+      const { tableId } = req.params;
+      const restaurantId = req.user.restaurant_id;
+
+      const table = await Table.findOne({
+        where: { 
+          id: tableId,
+          restaurant_id: restaurantId
         },
         include: [{
-            model: Table,
-            as: 'table'
+          model: Restaurant,
+          as: 'restaurant'
         }]
-    });
+      });
 
-    if (qrCodes.length === 0) {
-        throw new AppError('Keine QR-Codes gefunden', 404);
-    }
+      if (!table) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tisch nicht gefunden'
+        });
+      }
 
-    // Create ZIP archive
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    
-    res.header('Content-Type', 'application/zip');
-    res.header('Content-Disposition', `attachment; filename="${restaurant.slug}_qr_codes.zip"`);
-    
-    archive.pipe(res);
-
-    // Add QR codes to archive
-    for (const qrCode of qrCodes) {
-        const options = {
-            ...qrCode.style,
-            width: parseInt(size),
-            type: format,
-            margin: 2
-        };
-
-        const fileName = `table_${qrCode.table.number}`;
-
-        if (format === 'png') {
-            const buffer = await QRCodeLib.toBuffer(qrCode.tracking_url, options);
-            archive.append(buffer, { name: `${fileName}.png` });
-        } else if (format === 'svg') {
-            const svgString = await QRCodeLib.toString(qrCode.tracking_url, {
-                ...options,
-                type: 'svg'
-            });
-            archive.append(svgString, { name: `${fileName}.svg` });
-        }
-
-        // Add PDF if requested
-        if (include_pdf === 'true') {
-            const doc = new PDFDocument();
-            const chunks = [];
-            
-            doc.on('data', chunk => chunks.push(chunk));
-            doc.on('end', () => {
-                const pdfBuffer = Buffer.concat(chunks);
-                archive.append(pdfBuffer, { name: `${fileName}.pdf` });
-            });
-
-            doc.fontSize(20).text(restaurant.name, { align: 'center' });
-            doc.fontSize(14).text(`Tisch ${qrCode.table.number}`, { align: 'center' });
-            doc.moveDown();
-            
-            const qrBuffer = await QRCodeLib.toBuffer(qrCode.tracking_url, options);
-            doc.image(qrBuffer, { fit: [400, 400], align: 'center' });
-            
-            doc.end();
-        }
-    }
-
-    // Add info file
-    const info = `QR-Codes für ${restaurant.name}
-Generiert am: ${new Date().toLocaleString('de-DE')}
-Anzahl: ${qrCodes.length} QR-Codes
-Format: ${format.toUpperCase()}
-Größe: ${size}x${size}px`;
-    
-    archive.append(info, { name: 'INFO.txt' });
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: restaurantId,
-        action: 'qr_codes_bulk_downloaded',
-        category: 'qrcode',
-        metadata: { count: qrCodes.length, format }
-    });
-
-    archive.finalize();
-});
-
-// Get QR code preview
-const getQRCodePreview = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { 
-        table_number = 'T1',
-        style = {}
-    } = req.body;
-
-    const restaurant = await Restaurant.findByPk(restaurantId);
-    if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
-    }
-
-    // Generate preview URL
-    const previewUrl = `${process.env.BACKEND_URL}/track/PREVIEW_TOKEN`;
-    
-    // Merge styles
-    const finalStyle = {
-        ...restaurant.qr_code_style,
-        ...style
-    };
-
-    // Generate preview
-    const options = {
-        ...finalStyle,
-        width: 256,
-        type: 'png',
+      // HTML-Vorschau generieren
+      const trackingUrl = table.qr_code_url || 
+        `${process.env.BACKEND_URL || 'https://qr-restaurant-backend.onrender.com'}/api/public/track/${table.tracking_token}`;
+      
+      const qrCodeDataUrl = table.qr_code || await QRCode.toDataURL(trackingUrl, {
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+        width: 300,
         margin: 2
-    };
+      });
 
-    const buffer = await QRCodeLib.toBuffer(previewUrl, options);
-    const base64 = buffer.toString('base64');
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>QR-Code - Tisch ${table.table_number}</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              min-height: 100vh;
+              margin: 0;
+              background: #f5f5f5;
+            }
+            .container {
+              background: white;
+              padding: 40px;
+              border-radius: 10px;
+              box-shadow: 0 0 20px rgba(0,0,0,0.1);
+              text-align: center;
+              max-width: 400px;
+            }
+            h1 { color: #333; margin-bottom: 10px; }
+            h2 { color: #667eea; margin-bottom: 30px; }
+            .qr-code { margin: 20px 0; }
+            .info { 
+              margin-top: 20px; 
+              padding: 15px;
+              background: #f8f9fa;
+              border-radius: 5px;
+            }
+            .url {
+              word-break: break-all;
+              color: #666;
+              font-size: 12px;
+              margin-top: 10px;
+            }
+            .download-btn {
+              display: inline-block;
+              margin: 10px;
+              padding: 10px 20px;
+              background: #667eea;
+              color: white;
+              text-decoration: none;
+              border-radius: 5px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>${table.restaurant.name}</h1>
+            <h2>Tisch ${table.table_number}</h2>
+            <div class="qr-code">
+              <img src="${qrCodeDataUrl}" alt="QR-Code" />
+            </div>
+            <div class="info">
+              <strong>Scannen für Google Bewertung</strong>
+              <div class="url">${trackingUrl}</div>
+            </div>
+            <div>
+              <a href="/api/restaurant/qrcode/${table.id}/download?format=png" class="download-btn">
+                Download PNG
+              </a>
+              <a href="/api/restaurant/qrcode/${table.id}/download?format=svg" class="download-btn">
+                Download SVG
+              </a>
+            </div>
+          </div>
+        </body>
+        </html>
+      `;
 
-    res.json({
-        success: true,
-        data: {
-            preview: `data:image/png;base64,${base64}`,
-            style: finalStyle,
-            table_number
-        }
-    });
-});
+      res.send(html);
 
-// Bulk generate QR codes
-const bulkGenerateQRCodes = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-    const { table_ids, regenerate = false } = req.body;
-
-    if (!table_ids || !Array.isArray(table_ids)) {
-        throw new AppError('Table IDs erforderlich', 400);
+    } catch (error) {
+      console.error('QR-Code Vorschau Fehler:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Fehler beim Anzeigen der Vorschau'
+      });
     }
+  }
+}
 
-    const results = {
-        success: [],
-        failed: []
-    };
-
-    for (const tableId of table_ids) {
-        try {
-            const table = await Table.findOne({
-                where: {
-                    id: tableId,
-                    restaurant_id: restaurantId
-                }
-            });
-
-            if (!table) {
-                results.failed.push({ tableId, reason: 'Tisch nicht gefunden' });
-                continue;
-            }
-
-            let qrCode = await QRCode.findOne({
-                where: { table_id: tableId }
-            });
-
-            if (qrCode && qrCode.is_active && !regenerate) {
-                results.failed.push({ tableId, reason: 'QR-Code existiert bereits' });
-                continue;
-            }
-
-            if (regenerate && qrCode) {
-                await qrCode.deactivate();
-            }
-
-            const newQRCode = await QRCode.generateForTable(tableId, restaurantId);
-            results.success.push({
-                tableId,
-                qrCodeId: newQRCode.id,
-                token: newQRCode.token
-            });
-
-        } catch (error) {
-            results.failed.push({ tableId, reason: error.message });
-        }
-    }
-
-    res.json({
-        success: true,
-        message: `${results.success.length} erfolgreich, ${results.failed.length} fehlgeschlagen`,
-        data: results
-    });
-});
-
-// Get QR code statistics
-const getQRCodeStatistics = asyncHandler(async (req, res) => {
-    const { restaurantId } = req.params;
-
-    const [
-        totalQRCodes,
-        activeQRCodes,
-        totalScans,
-        todayScans,
-        topQRCodes
-    ] = await Promise.all([
-        QRCode.count({ where: { restaurant_id: restaurantId } }),
-        
-        QRCode.count({ 
-            where: { 
-                restaurant_id: restaurantId,
-                is_active: true 
-            } 
-        }),
-        
-        Scan.count({ where: { restaurant_id: restaurantId } }),
-        
-        Scan.count({
-            where: {
-                restaurant_id: restaurantId,
-                created_at: {
-                    [require('sequelize').Op.gte]: new Date().setHours(0, 0, 0, 0)
-                }
-            }
-        }),
-        
-        QRCode.findAll({
-            where: { restaurant_id: restaurantId },
-            order: [['scan_count', 'DESC']],
-            limit: 5,
-            include: [{
-                model: Table,
-                as: 'table',
-                attributes: ['number', 'name']
-            }]
-        })
-    ]);
-
-    res.json({
-        success: true,
-        data: {
-            totalQRCodes,
-            activeQRCodes,
-            inactiveQRCodes: totalQRCodes - activeQRCodes,
-            totalScans,
-            todayScans,
-            topQRCodes
-        }
-    });
-});
-
-module.exports = {
-    getAllQRCodes,
-    getQRCode,
-    generateQRCode,
-    regenerateQRCode,
-    updateQRCodeStyle,
-    downloadQRCode,
-    downloadAllQRCodes,
-    getQRCodePreview,
-    bulkGenerateQRCodes,
-    getQRCodeStatistics
-};
+module.exports = new QRCodeController();
