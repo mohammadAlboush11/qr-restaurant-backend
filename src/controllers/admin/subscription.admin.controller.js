@@ -1,513 +1,405 @@
-/**
- * Subscription Admin Controller
- * Speichern als: backend/src/controllers/admin/subscription.admin.controller.js
- */
-
 const { 
-    Subscription, 
-    Restaurant, 
-    Plan, 
-    Payment,
-    User,
-    ActivityLog 
+  Subscription, 
+  Restaurant, 
+  Plan, 
+  Payment,
+  User,
+  ActivityLog 
 } = require('../../models');
-const { sequelize } = require('../../config/database');
+const { Op } = require('sequelize');
 const { asyncHandler, AppError } = require('../../middleware/errorHandler');
 const logger = require('../../utils/logger');
 
-// Get all subscriptions
-const getAllSubscriptions = asyncHandler(async (req, res) => {
-    const { 
-        page = 1, 
-        limit = 20,
-        status,
-        plan_id,
-        expiring_soon,
-        sort_by = 'created_at',
-        sort_order = 'DESC'
-    } = req.query;
-
+class SubscriptionAdminController {
+  // Alle Subscriptions abrufen
+  getAllSubscriptions = asyncHandler(async (req, res) => {
+    const { page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
-    // Build where clause
-    const where = {};
-    
-    if (status) {
-        where.status = status;
-    }
-    
-    if (plan_id) {
-        where.plan_id = plan_id;
-    }
-    
-    if (expiring_soon === 'true') {
-        const futureDate = new Date();
-        futureDate.setDate(futureDate.getDate() + 7);
-        
-        where.end_date = {
-            [sequelize.Op.between]: [new Date(), futureDate]
-        };
-    }
-
     const { count, rows } = await Subscription.findAndCountAll({
-        where,
-        include: [
-            {
-                model: Restaurant,
-                as: 'restaurant',
-                include: [{
-                    model: User,
-                    as: 'owner',
-                    attributes: ['id', 'email', 'first_name', 'last_name']
-                }]
-            },
-            {
-                model: Plan,
-                as: 'plan'
-            }
-        ],
-        order: [[sort_by, sort_order]],
-        limit: parseInt(limit),
-        offset
+      include: [
+        {
+          model: Restaurant,
+          as: 'restaurant',
+          include: [{
+            model: User,
+            as: 'user',
+            attributes: ['id', 'email', 'name']
+          }]
+        },
+        {
+          model: Plan,
+          as: 'plan'
+        }
+      ],
+      order: [['created_at', 'DESC']],
+      limit: parseInt(limit),
+      offset
     });
 
     res.json({
-        success: true,
-        data: {
-            subscriptions: rows,
-            pagination: {
-                total: count,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                pages: Math.ceil(count / limit)
-            }
+      success: true,
+      data: {
+        subscriptions: rows,
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(count / limit)
         }
+      }
     });
-});
+  });
 
-// Get subscription details
-const getSubscriptionDetails = asyncHandler(async (req, res) => {
+  // Subscription Details
+  getSubscriptionDetails = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const subscription = await Subscription.findByPk(id, {
-        include: [
-            {
-                model: Restaurant,
-                as: 'restaurant',
-                include: ['owner']
-            },
-            {
-                model: Plan,
-                as: 'plan'
-            },
-            {
-                model: Payment,
-                as: 'payments',
-                order: [['created_at', 'DESC']],
-                limit: 10
-            }
-        ]
+      include: [
+        {
+          model: Restaurant,
+          as: 'restaurant',
+          include: [{
+            model: User,
+            as: 'user'
+          }]
+        },
+        {
+          model: Plan,
+          as: 'plan'
+        }
+      ]
     });
 
     if (!subscription) {
-        throw new AppError('Subscription nicht gefunden', 404);
+      throw new AppError('Subscription nicht gefunden', 404);
     }
 
     res.json({
-        success: true,
-        data: subscription
+      success: true,
+      data: subscription
     });
-});
+  });
 
-// Create subscription
-const createSubscription = asyncHandler(async (req, res) => {
+  // Subscription erstellen
+  createSubscription = asyncHandler(async (req, res) => {
     const {
-        restaurant_id,
-        plan_id,
-        status = 'pending',
-        billing_cycle = 'monthly',
-        is_trial = false,
-        trial_days = 0,
-        notes
+      restaurant_id,
+      plan_id,
+      status = 'active',
+      start_date,
+      end_date,
+      price,
+      notes
     } = req.body;
 
-    // Check if restaurant exists
+    // Prüfungen
     const restaurant = await Restaurant.findByPk(restaurant_id);
     if (!restaurant) {
-        throw new AppError('Restaurant nicht gefunden', 404);
+      throw new AppError('Restaurant nicht gefunden', 404);
     }
 
-    // Check if restaurant already has active subscription
+    const plan = await Plan.findByPk(plan_id);
+    if (!plan) {
+      throw new AppError('Plan nicht gefunden', 404);
+    }
+
+    // Aktive Subscription prüfen
     const existingSubscription = await Subscription.findOne({
-        where: {
-            restaurant_id,
-            status: ['active', 'pending']
-        }
+      where: {
+        restaurant_id,
+        status: 'active'
+      }
     });
 
     if (existingSubscription) {
-        throw new AppError('Restaurant hat bereits ein aktives Abonnement', 400);
+      throw new AppError('Restaurant hat bereits ein aktives Abonnement', 400);
     }
 
-    // Check if plan exists
-    const plan = await Plan.findByPk(plan_id);
-    if (!plan) {
-        throw new AppError('Plan nicht gefunden', 404);
-    }
-
-    // Calculate dates
+    // Daten vorbereiten
     const now = new Date();
-    let endDate = null;
-    let trialEndsAt = null;
+    const subscriptionData = {
+      restaurant_id,
+      plan_id,
+      status,
+      start_date: start_date || now,
+      end_date: end_date || new Date(now.setMonth(now.getMonth() + 1)),
+      price: price || plan.price,
+      auto_renew: true,
+      notes
+    };
 
-    if (is_trial && trial_days > 0) {
-        trialEndsAt = new Date(now);
-        trialEndsAt.setDate(trialEndsAt.getDate() + trial_days);
-    }
+    const subscription = await Subscription.create(subscriptionData);
 
-    if (billing_cycle === 'monthly') {
-        endDate = new Date(now);
-        endDate.setMonth(endDate.getMonth() + 1);
-    } else if (billing_cycle === 'yearly') {
-        endDate = new Date(now);
-        endDate.setFullYear(endDate.getFullYear() + 1);
-    }
-
-    // Create subscription
-    const subscription = await Subscription.create({
-        restaurant_id,
-        plan_id,
-        status,
-        billing_cycle,
-        is_trial,
-        trial_ends_at: trialEndsAt,
-        start_date: now,
-        end_date: endDate,
-        notes,
-        created_by: req.user.id
-    });
-
-    // Activate if status is active
+    // Restaurant aktivieren wenn Subscription aktiv
     if (status === 'active') {
-        await subscription.activate(req.user.id);
-        await restaurant.update({ is_active: true });
+      await restaurant.update({ 
+        is_active: true,
+        subscription_status: 'active',
+        subscription_end_date: subscription.end_date
+      });
     }
 
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
+    // Activity Log
+    if (ActivityLog && ActivityLog.logActivity) {
+      await ActivityLog.logActivity({
+        user_id: req.user?.id,
         restaurant_id,
         action: 'subscription_created',
         category: 'subscription',
         entity_type: 'Subscription',
         entity_id: subscription.id,
         metadata: { plan_name: plan.name, status }
-    });
+      });
+    }
+
+    logger.info(`Subscription created for restaurant ${restaurant_id}`);
 
     res.status(201).json({
-        success: true,
-        message: 'Subscription erfolgreich erstellt',
-        data: subscription
+      success: true,
+      message: 'Subscription erfolgreich erstellt',
+      data: subscription
     });
-});
+  });
 
-// Update subscription
-const updateSubscription = asyncHandler(async (req, res) => {
+  // Subscription aktualisieren
+  updateSubscription = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
     const subscription = await Subscription.findByPk(id, {
-        include: ['restaurant', 'plan']
+      include: ['restaurant', 'plan']
     });
 
     if (!subscription) {
-        throw new AppError('Subscription nicht gefunden', 404);
+      throw new AppError('Subscription nicht gefunden', 404);
     }
 
-    const oldValues = subscription.toJSON();
-
-    // Handle status changes
+    // Status-Änderungen behandeln
     if (updates.status && updates.status !== subscription.status) {
-        switch (updates.status) {
-            case 'active':
-                await subscription.activate(req.user.id);
-                break;
-            case 'cancelled':
-                await subscription.cancel(updates.cancellation_reason, req.user.id);
-                break;
-            case 'expired':
-                await subscription.expire();
-                break;
-            default:
-                subscription.status = updates.status;
-                await subscription.save();
-        }
-    }
-
-    // Update other fields
-    const allowedFields = [
-        'plan_id', 'end_date', 'auto_renew', 'billing_cycle',
-        'notes', 'admin_notes', 'limits_override'
-    ];
-
-    const filteredUpdates = {};
-    allowedFields.forEach(field => {
-        if (updates[field] !== undefined && field !== 'status') {
-            filteredUpdates[field] = updates[field];
-        }
-    });
-
-    if (Object.keys(filteredUpdates).length > 0) {
-        await subscription.update({
-            ...filteredUpdates,
-            updated_by: req.user.id
+      // Restaurant-Status synchronisieren
+      if (updates.status === 'active') {
+        await subscription.restaurant.update({ 
+          is_active: true,
+          subscription_status: 'active'
         });
+      } else if (updates.status === 'cancelled' || updates.status === 'expired') {
+        await subscription.restaurant.update({ 
+          is_active: false,
+          subscription_status: updates.status
+        });
+      }
     }
 
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
+    await subscription.update(updates);
+
+    // Activity Log
+    if (ActivityLog && ActivityLog.logActivity) {
+      await ActivityLog.logActivity({
+        user_id: req.user?.id,
         restaurant_id: subscription.restaurant_id,
         action: 'subscription_updated',
         category: 'subscription',
         entity_type: 'Subscription',
         entity_id: subscription.id,
-        old_values: oldValues,
         new_values: updates
-    });
+      });
+    }
 
     res.json({
-        success: true,
-        message: 'Subscription erfolgreich aktualisiert',
-        data: subscription
+      success: true,
+      message: 'Subscription erfolgreich aktualisiert',
+      data: subscription
     });
-});
+  });
 
-// Cancel subscription
-const cancelSubscription = asyncHandler(async (req, res) => {
+  // Subscription stornieren
+  cancelSubscription = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
     const subscription = await Subscription.findByPk(id, {
-        include: ['restaurant']
+      include: ['restaurant']
     });
 
     if (!subscription) {
-        throw new AppError('Subscription nicht gefunden', 404);
+      throw new AppError('Subscription nicht gefunden', 404);
     }
 
-    await subscription.cancel(reason, req.user.id);
-
-    // Deactivate restaurant
-    await subscription.restaurant.update({ 
-        is_active: false,
-        deactivation_reason: 'Subscription cancelled'
+    // Subscription als cancelled markieren
+    await subscription.update({
+      status: 'cancelled',
+      cancelled_at: new Date(),
+      cancellation_reason: reason
     });
 
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
+    // Restaurant deaktivieren
+    await subscription.restaurant.update({ 
+      is_active: false,
+      subscription_status: 'cancelled'
+    });
+
+    // Activity Log
+    if (ActivityLog && ActivityLog.logActivity) {
+      await ActivityLog.logActivity({
+        user_id: req.user?.id,
         restaurant_id: subscription.restaurant_id,
         action: 'subscription_cancelled',
         category: 'subscription',
         entity_type: 'Subscription',
         entity_id: subscription.id,
         metadata: { reason }
-    });
+      });
+    }
+
+    logger.info(`Subscription ${id} cancelled`);
 
     res.json({
-        success: true,
-        message: 'Subscription erfolgreich storniert'
+      success: true,
+      message: 'Subscription erfolgreich storniert'
     });
-});
+  });
 
-// Extend subscription
-const extendSubscription = asyncHandler(async (req, res) => {
+  // Subscription verlängern
+  extendSubscription = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { extension_days, new_end_date } = req.body;
 
     const subscription = await Subscription.findByPk(id);
     
     if (!subscription) {
-        throw new AppError('Subscription nicht gefunden', 404);
+      throw new AppError('Subscription nicht gefunden', 404);
     }
 
     let newEndDate;
     if (new_end_date) {
-        newEndDate = new Date(new_end_date);
+      newEndDate = new Date(new_end_date);
     } else if (extension_days) {
-        newEndDate = new Date(subscription.end_date || new Date());
-        newEndDate.setDate(newEndDate.getDate() + extension_days);
+      newEndDate = new Date(subscription.end_date || new Date());
+      newEndDate.setDate(newEndDate.getDate() + extension_days);
     } else {
-        throw new AppError('Extension days oder new end date erforderlich', 400);
+      throw new AppError('Extension days oder new end date erforderlich', 400);
     }
 
-    const oldEndDate = subscription.end_date;
-    subscription.end_date = newEndDate;
-    subscription.updated_by = req.user.id;
-    await subscription.save();
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: subscription.restaurant_id,
-        action: 'subscription_extended',
-        category: 'subscription',
-        entity_type: 'Subscription',
-        entity_id: subscription.id,
-        metadata: {
-            old_end_date: oldEndDate,
-            new_end_date: newEndDate,
-            extension_days
-        }
-    });
+    await subscription.update({ end_date: newEndDate });
 
     res.json({
-        success: true,
-        message: 'Subscription erfolgreich verlängert',
-        data: subscription
+      success: true,
+      message: 'Subscription erfolgreich verlängert',
+      data: subscription
     });
-});
+  });
 
-// Change subscription plan
-const changePlan = asyncHandler(async (req, res) => {
+  // Plan wechseln
+  changePlan = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { new_plan_id, immediate = false } = req.body;
+    const { new_plan_id } = req.body;
 
-    const subscription = await Subscription.findByPk(id, {
-        include: ['plan']
-    });
-
+    const subscription = await Subscription.findByPk(id);
     if (!subscription) {
-        throw new AppError('Subscription nicht gefunden', 404);
+      throw new AppError('Subscription nicht gefunden', 404);
     }
 
     const newPlan = await Plan.findByPk(new_plan_id);
     if (!newPlan) {
-        throw new AppError('Neuer Plan nicht gefunden', 404);
+      throw new AppError('Neuer Plan nicht gefunden', 404);
     }
 
-    const oldPlanId = subscription.plan_id;
-    const oldPlanName = subscription.plan.name;
-
-    if (immediate) {
-        // Change plan immediately
-        subscription.plan_id = new_plan_id;
-        subscription.updated_by = req.user.id;
-        await subscription.save();
-    } else {
-        // Schedule plan change for next billing cycle
-        subscription.metadata = {
-            ...subscription.metadata,
-            scheduled_plan_change: {
-                plan_id: new_plan_id,
-                effective_date: subscription.end_date
-            }
-        };
-        subscription.updated_by = req.user.id;
-        await subscription.save();
-    }
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        restaurant_id: subscription.restaurant_id,
-        action: 'subscription_plan_changed',
-        category: 'subscription',
-        entity_type: 'Subscription',
-        entity_id: subscription.id,
-        metadata: {
-            old_plan: oldPlanName,
-            new_plan: newPlan.name,
-            immediate
-        }
+    await subscription.update({ 
+      plan_id: new_plan_id,
+      price: newPlan.price
     });
 
     res.json({
-        success: true,
-        message: `Plan ${immediate ? 'sofort' : 'zum nächsten Abrechnungszyklus'} geändert`,
-        data: subscription
+      success: true,
+      message: 'Plan erfolgreich geändert',
+      data: subscription
     });
-});
+  });
 
-// Get expiring subscriptions
-const getExpiringSubscriptions = asyncHandler(async (req, res) => {
+  // Ablaufende Subscriptions
+  getExpiringSubscriptions = asyncHandler(async (req, res) => {
     const { days = 7 } = req.query;
-
-    const subscriptions = await Subscription.getExpiringSubscriptions(parseInt(days));
+    
+    const futureDate = new Date();
+    futureDate.setDate(futureDate.getDate() + parseInt(days));
+    
+    const subscriptions = await Subscription.findAll({
+      where: {
+        status: 'active',
+        end_date: {
+          [Op.between]: [new Date(), futureDate]
+        }
+      },
+      include: ['restaurant', 'plan']
+    });
 
     res.json({
-        success: true,
-        data: {
-            count: subscriptions.length,
-            subscriptions
-        }
+      success: true,
+      data: {
+        count: subscriptions.length,
+        subscriptions
+      }
     });
-});
+  });
 
-// Bulk update subscriptions
-const bulkUpdateSubscriptions = asyncHandler(async (req, res) => {
+  // Bulk Update
+  bulkUpdateSubscriptions = asyncHandler(async (req, res) => {
     const { subscription_ids, action, data } = req.body;
 
     if (!subscription_ids || !Array.isArray(subscription_ids)) {
-        throw new AppError('Subscription IDs erforderlich', 400);
+      throw new AppError('Subscription IDs erforderlich', 400);
     }
 
     const results = {
-        success: [],
-        failed: []
+      success: [],
+      failed: []
     };
 
     for (const id of subscription_ids) {
-        try {
-            const subscription = await Subscription.findByPk(id);
-            
-            if (!subscription) {
-                results.failed.push({ id, reason: 'Nicht gefunden' });
-                continue;
-            }
-
-            switch (action) {
-                case 'activate':
-                    await subscription.activate(req.user.id);
-                    break;
-                case 'cancel':
-                    await subscription.cancel(data?.reason, req.user.id);
-                    break;
-                case 'extend':
-                    if (data?.days) {
-                        const newEndDate = new Date(subscription.end_date);
-                        newEndDate.setDate(newEndDate.getDate() + data.days);
-                        subscription.end_date = newEndDate;
-                        await subscription.save();
-                    }
-                    break;
-                default:
-                    results.failed.push({ id, reason: 'Ungültige Aktion' });
-                    continue;
-            }
-
-            results.success.push(id);
-        } catch (error) {
-            results.failed.push({ id, reason: error.message });
+      try {
+        const subscription = await Subscription.findByPk(id);
+        
+        if (!subscription) {
+          results.failed.push({ id, reason: 'Nicht gefunden' });
+          continue;
         }
+
+        switch (action) {
+          case 'activate':
+            await subscription.update({ status: 'active' });
+            break;
+          case 'cancel':
+            await subscription.update({ 
+              status: 'cancelled',
+              cancellation_reason: data?.reason
+            });
+            break;
+          case 'extend':
+            if (data?.days) {
+              const newEndDate = new Date(subscription.end_date);
+              newEndDate.setDate(newEndDate.getDate() + data.days);
+              await subscription.update({ end_date: newEndDate });
+            }
+            break;
+          default:
+            results.failed.push({ id, reason: 'Ungültige Aktion' });
+            continue;
+        }
+
+        results.success.push(id);
+      } catch (error) {
+        results.failed.push({ id, reason: error.message });
+      }
     }
 
     res.json({
-        success: true,
-        message: `${results.success.length} erfolgreich, ${results.failed.length} fehlgeschlagen`,
-        data: results
+      success: true,
+      message: `${results.success.length} erfolgreich, ${results.failed.length} fehlgeschlagen`,
+      data: results
     });
-});
+  });
+}
 
-module.exports = {
-    getAllSubscriptions,
-    getSubscriptionDetails,
-    createSubscription,
-    updateSubscription,
-    cancelSubscription,
-    extendSubscription,
-    changePlan,
-    getExpiringSubscriptions,
-    bulkUpdateSubscriptions
-};
+module.exports = new SubscriptionAdminController();

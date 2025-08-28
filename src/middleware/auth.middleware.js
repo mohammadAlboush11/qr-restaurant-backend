@@ -1,233 +1,135 @@
 /**
- * Auth Middleware - KORRIGIERTE VERSION
+ * Auth Middleware with Restaurant Check
  * Speichern als: backend/src/middleware/auth.middleware.js
  */
 
 const jwt = require('jsonwebtoken');
 const { User, Restaurant } = require('../models');
 
-class AuthMiddleware {
-  // Haupt-Authentifizierungs-Middleware
-  async authenticate(req, res, next) {
-    try {
-      // Token aus verschiedenen Quellen extrahieren
-      const token = this.extractToken(req);
-      
-      if (!token) {
-        return res.status(401).json({
-          success: false,
-          message: 'Keine Authentifizierung vorhanden'
-        });
-      }
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 
-      // Token verifizieren
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
-      
-      // Benutzer aus DB laden mit Restaurant-Daten
-      const user = await User.findByPk(decoded.userId, {
-        attributes: { exclude: ['password'] },
-        include: [{
-          model: Restaurant,
-          as: 'restaurant',
-          attributes: ['id', 'name', 'is_active', 'subscription_status', 'subscription_end_date']
-        }]
+const authenticateToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Kein Token vorhanden'
       });
+    }
 
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Benutzer nicht gefunden'
-        });
-      }
-
-      if (!user.is_active) {
+    jwt.verify(token, JWT_SECRET, async (err, decoded) => {
+      if (err) {
         return res.status(403).json({
           success: false,
-          message: 'Account ist deaktiviert'
+          message: 'Token ungültig'
         });
       }
 
-      // User-Objekt an Request anhängen
-      req.user = {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        restaurant_id: user.restaurant_id,
-        restaurant: user.restaurant
-      };
-
-      // Token-Refresh wenn nötig (verlängert Session)
-      if (this.shouldRefreshToken(decoded)) {
-        const newToken = this.generateToken(user);
-        res.setHeader('X-New-Token', newToken);
-      }
-
-      next();
-    } catch (error) {
-      if (error.name === 'TokenExpiredError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Token ist abgelaufen',
-          code: 'TOKEN_EXPIRED'
-        });
-      }
-      
-      if (error.name === 'JsonWebTokenError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Ungültiger Token',
-          code: 'INVALID_TOKEN'
-        });
-      }
-      
-      console.error('Auth Middleware Fehler:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Authentifizierungsfehler'
-      });
-    }
-  }
-
-  // Token aus Request extrahieren
-  extractToken(req) {
-    // 1. Check Authorization Header (Bearer Token)
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      return authHeader.substring(7);
-    }
-
-    // 2. Check x-auth-token Header
-    if (req.headers['x-auth-token']) {
-      return req.headers['x-auth-token'];
-    }
-
-    // 3. Check Query Parameter (für Downloads etc.)
-    if (req.query.token) {
-      return req.query.token;
-    }
-
-    // 4. Check Cookies (falls verwendet)
-    if (req.cookies && req.cookies.token) {
-      return req.cookies.token;
-    }
-
-    return null;
-  }
-
-  // Prüfen ob Token erneuert werden sollte
-  shouldRefreshToken(decoded) {
-    const now = Math.floor(Date.now() / 1000);
-    const timeUntilExpiry = decoded.exp - now;
-    const halfTime = (decoded.exp - decoded.iat) / 2;
-    
-    // Erneuere Token wenn mehr als die Hälfte der Zeit abgelaufen ist
-    return timeUntilExpiry < halfTime;
-  }
-
-  // Token generieren
-  generateToken(user) {
-    return jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        restaurant_id: user.restaurant_id
-      },
-      process.env.JWT_SECRET || 'your-secret-key-change-this',
-      {
-        expiresIn: '7d' // Token gilt 7 Tage
-      }
-    );
-  }
-
-  // Restaurant Owner Middleware
-  async requireRestaurantOwner(req, res, next) {
-    try {
-      await this.authenticate(req, res, async () => {
-        if (req.user.role !== 'restaurant') {
-          return res.status(403).json({
-            success: false,
-            message: 'Zugriff nur für Restaurant-Inhaber'
-          });
-        }
-
-        // Prüfe ob Restaurant aktiv ist
-        if (req.user.restaurant && !req.user.restaurant.is_active) {
-          return res.status(403).json({
-            success: false,
-            message: 'Restaurant ist deaktiviert'
-          });
-        }
-
-        next();
-      });
-    } catch (error) {
-      console.error('Restaurant Owner Middleware Fehler:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Autorisierungsfehler'
-      });
-    }
-  }
-
-  // Admin Middleware
-  async requireAdmin(req, res, next) {
-    try {
-      await this.authenticate(req, res, async () => {
-        if (req.user.role !== 'admin') {
-          return res.status(403).json({
-            success: false,
-            message: 'Zugriff nur für Administratoren'
-          });
-        }
-        next();
-      });
-    } catch (error) {
-      console.error('Admin Middleware Fehler:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Autorisierungsfehler'
-      });
-    }
-  }
-
-  // Optional Authentication (für öffentliche Endpoints mit optionaler Auth)
-  async optionalAuth(req, res, next) {
-    try {
-      const token = this.extractToken(req);
-      
-      if (!token) {
-        req.user = null;
-        return next();
-      }
-
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
-      
-      const user = await User.findByPk(decoded.userId, {
-        attributes: { exclude: ['password'] },
+      // User mit Restaurant laden
+      const user = await User.findByPk(decoded.id, {
         include: [{
           model: Restaurant,
           as: 'restaurant'
         }]
       });
 
-      req.user = user ? {
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer nicht gefunden'
+        });
+      }
+
+      req.user = {
         id: user.id,
         email: user.email,
-        name: user.name,
         role: user.role,
         restaurant_id: user.restaurant_id,
         restaurant: user.restaurant
-      } : null;
-
+      };
+      
       next();
-    } catch (error) {
-      // Bei Fehler einfach ohne User weitermachen
-      req.user = null;
-      next();
-    }
+    });
+  } catch (error) {
+    console.error('Auth Middleware Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Authentifizierungsfehler'
+    });
   }
-}
+};
 
-module.exports = new AuthMiddleware();
+const requireRestaurant = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Nicht authentifiziert'
+      });
+    }
+
+    // Check if user has restaurant role
+    if (req.user.role !== 'restaurant' && req.user.role !== 'restaurant_owner') {
+      return res.status(403).json({
+        success: false,
+        message: 'Keine Restaurant-Berechtigung'
+      });
+    }
+
+    // Check if restaurant exists
+    if (!req.user.restaurant_id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Kein Restaurant zugeordnet'
+      });
+    }
+
+    // Verify restaurant exists and is active
+    let restaurant = req.user.restaurant;
+    
+    if (!restaurant) {
+      restaurant = await Restaurant.findByPk(req.user.restaurant_id);
+      
+      if (!restaurant) {
+        // Restaurant existiert nicht - erstelle es automatisch
+        console.log(`Restaurant mit ID ${req.user.restaurant_id} existiert nicht - wird erstellt`);
+        
+        restaurant = await Restaurant.create({
+          id: req.user.restaurant_id,
+          name: 'Mein Restaurant',
+          email: req.user.email,
+          slug: `restaurant-${req.user.restaurant_id}`,
+          is_active: true,
+          subscription_status: 'trial'
+        });
+        
+        console.log('Restaurant automatisch erstellt:', restaurant.id);
+      }
+      
+      req.user.restaurant = restaurant;
+    }
+
+    if (!restaurant.is_active) {
+      return res.status(403).json({
+        success: false,
+        message: 'Restaurant ist deaktiviert'
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error('Restaurant Middleware Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Fehler bei Restaurant-Überprüfung'
+    });
+  }
+};
+
+module.exports = {
+  authenticateToken,
+  requireRestaurant
+};

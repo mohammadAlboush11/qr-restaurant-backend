@@ -1,45 +1,49 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
-const { v4: uuidv4 } = require('uuid');
 
-const Table = sequelize.define('Table', {
+const QRCode = sequelize.define('QRCode', {
   id: {
     type: DataTypes.INTEGER,
     primaryKey: true,
     autoIncrement: true
   },
-  restaurant_id: {
+  table_id: {
     type: DataTypes.INTEGER,
+    allowNull: false,
+    references: {
+      model: 'tables',
+      key: 'id'
+    }
+  },
+  code: {
+    type: DataTypes.STRING,
+    unique: true,
     allowNull: false
   },
-  table_number: {
+  qr_image: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  redirect_url: {
     type: DataTypes.STRING,
     allowNull: false
-  },
-  description: {
-    type: DataTypes.TEXT,
-    allowNull: true
-  },
-  qr_code: {  // DIES IST DAS PROBLEM - Umbenennen zu qr_code_string
-    type: DataTypes.TEXT,
-    allowNull: true
-  },
-  scan_count: {
-    type: DataTypes.INTEGER,
-    defaultValue: 0
   },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
-  last_scan_at: {
+  scan_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  last_scanned_at: {
     type: DataTypes.DATE,
     allowNull: true
   }
 }, {
-  tableName: 'tables',
+  tableName: 'qr_codes',
   underscored: true,
   timestamps: true
 });
 
-module.exports = Table;
+module.exports = QRCode;

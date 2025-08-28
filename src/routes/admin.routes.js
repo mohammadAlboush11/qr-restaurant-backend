@@ -189,6 +189,52 @@ router.delete('/restaurants/:id', async (req, res) => {
   }
 });
 
+// ============================
+// EMAIL STATUS ROUTES
+// ============================
+router.get('/email-status', (req, res) => {
+  try {
+    const status = {
+      isConfigured: !!process.env.SMTP_USER && !!process.env.SMTP_PASS,
+      smtp_host: process.env.SMTP_HOST || 'smtp.strato.de',
+      smtp_port: process.env.SMTP_PORT || 465,
+      smtp_user: process.env.SMTP_USER ? '✓ Konfiguriert' : '✗ Nicht konfiguriert',
+      notification_email: process.env.NOTIFICATION_EMAIL || 'Nicht gesetzt'
+    };
+    
+    res.json({
+      success: true,
+      status: status,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Fehler beim Abrufen des E-Mail Status'
+    });
+  }
+});
+
+router.post('/test-email', async (req, res) => {
+  try {
+    const { to } = req.body;
+    const testEmail = to || process.env.ADMIN_EMAIL || 'admin@lt-express.de';
+    
+    console.log(`📧 Test-E-Mail angefordert für: ${testEmail}`);
+    
+    res.json({
+      success: true,
+      message: `Test-E-Mail würde gesendet an ${testEmail} (Service aktuell deaktiviert)`
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Fehler beim Senden der Test-E-Mail'
+    });
+  }
+});
+
+
 // Zahlungen abrufen
 router.get('/payments', async (req, res) => {
   try {

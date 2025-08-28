@@ -1,23 +1,21 @@
-﻿/**
- * Simple Logger
- * Speichern als: backend/src/utils/logger.js
- */
-
-const logger = {
-    info: (message, ...args) => {
-        console.log(`[INFO] ${message}`, ...args);
-    },
-    error: (message, ...args) => {
-        console.error(`[ERROR] ${message}`, ...args);
-    },
-    warn: (message, ...args) => {
-        console.warn(`[WARN] ${message}`, ...args);
-    },
-    debug: (message, ...args) => {
-        if (process.env.NODE_ENV === 'development') {
-            console.log(`[DEBUG] ${message}`, ...args);
-        }
+﻿const logger = {
+  info: (message, meta = {}) => {
+    console.log(`ℹ️ INFO: ${message}`, meta);
+  },
+  
+  error: (message, error = null) => {
+    console.error(`❌ ERROR: ${message}`, error);
+  },
+  
+  warn: (message, meta = {}) => {
+    console.warn(`⚠️ WARN: ${message}`, meta);
+  },
+  
+  debug: (message, meta = {}) => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`🐛 DEBUG: ${message}`, meta);
     }
+  }
 };
 
 module.exports = logger;

@@ -1,572 +1,464 @@
-/**
- * User Admin Controller
- * Speichern als: backend/src/controllers/admin/user.admin.controller.js
- */
-
 const { 
-    User, 
-    Restaurant, 
-    ActivityLog 
+  User, 
+  Restaurant, 
+  ActivityLog 
 } = require('../../models');
-const { sequelize } = require('../../config/database');
-const { asyncHandler, AppError } = require('../../middleware/errorHandler');
+const { Op } = require('sequelize');
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { asyncHandler, AppError } = require('../../middleware/errorHandler');
 const logger = require('../../utils/logger');
 
-// Get all users
-const getAllUsers = asyncHandler(async (req, res) => {
+class UserAdminController {
+  // Alle Benutzer abrufen
+  getAllUsers = asyncHandler(async (req, res) => {
     const { 
-        page = 1, 
-        limit = 20,
-        role,
-        is_active,
-        is_email_verified,
-        search,
-        sort_by = 'created_at',
-        sort_order = 'DESC'
+      page = 1, 
+      limit = 20,
+      role,
+      is_active,
+      search
     } = req.query;
 
     const offset = (page - 1) * limit;
-
-    // Build where clause
     const where = {};
     
     if (role) where.role = role;
     if (is_active !== undefined) where.is_active = is_active === 'true';
-    if (is_email_verified !== undefined) where.is_email_verified = is_email_verified === 'true';
     
     if (search) {
-        where[sequelize.Op.or] = [
-            { email: { [sequelize.Op.iLike]: `%${search}%` } },
-            { first_name: { [sequelize.Op.iLike]: `%${search}%` } },
-            { last_name: { [sequelize.Op.iLike]: `%${search}%` } }
-        ];
+      where[Op.or] = [
+        { email: { [Op.like]: `%${search}%` } },
+        { name: { [Op.like]: `%${search}%` } },
+        { first_name: { [Op.like]: `%${search}%` } },
+        { last_name: { [Op.like]: `%${search}%` } }
+      ];
     }
 
     const { count, rows } = await User.findAndCountAll({
-        where,
-        attributes: { exclude: ['password'] },
-        include: [{
-            model: Restaurant,
-            as: 'restaurants',
-            required: false,
-            attributes: ['id', 'name', 'slug', 'is_active']
-        }],
-        order: [[sort_by, sort_order]],
-        limit: parseInt(limit),
-        offset
+      where,
+      attributes: { exclude: ['password'] },
+      include: [{
+        model: Restaurant,
+        as: 'restaurants',
+        required: false,
+        attributes: ['id', 'name', 'slug', 'is_active']
+      }],
+      order: [['created_at', 'DESC']],
+      limit: parseInt(limit),
+      offset
     });
-
-    // Get additional stats
-    const usersWithStats = await Promise.all(
-        rows.map(async (user) => {
-            const loginCount = await ActivityLog.count({
-                where: {
-                    user_id: user.id,
-                    action: 'login_success',
-                    created_at: {
-                        [sequelize.Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-                    }
-                }
-            });
-
-            return {
-                ...user.toJSON(),
-                stats: {
-                    login_count_30d: loginCount,
-                    restaurants_count: user.restaurants?.length || 0
-                }
-            };
-        })
-    );
 
     res.json({
-        success: true,
-        data: {
-            users: usersWithStats,
-            pagination: {
-                total: count,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                pages: Math.ceil(count / limit)
-            }
+      success: true,
+      data: {
+        users: rows,
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(count / limit)
         }
+      }
     });
-});
+  });
 
-// Get user details
-const getUserDetails = asyncHandler(async (req, res) => {
+  // Benutzer Details
+  getUserDetails = async (req, res) => {
+  try {
     const { id } = req.params;
 
     const user = await User.findByPk(id, {
-        attributes: { exclude: ['password'] },
-        include: [{
-            model: Restaurant,
-            as: 'restaurants',
-            include: ['subscription']
-        }]
+      attributes: { exclude: ['password'] },
+      include: [{
+        model: Restaurant,
+        as: 'restaurants'
+      }]
     });
 
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      return res.status(404).json({
+        success: false,
+        message: 'Benutzer nicht gefunden'
+      });
     }
 
-    // Get recent activity
-    const recentActivity = await ActivityLog.getUserActivities(id, 20);
+    // Get recent activity - vereinfacht ohne Include
+    let recentActivity = [];
+    if (ActivityLog && ActivityLog.getUserActivities) {
+      recentActivity = await ActivityLog.getUserActivities(id, 20);
+    }
 
     res.json({
-        success: true,
-        data: {
-            user,
-            recentActivity
-        }
+      success: true,
+      data: {
+        user,
+        recentActivity
+      }
     });
-});
+  } catch (error) {
+    console.error('Get User Details Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Fehler beim Abrufen der Benutzer-Details'
+    });
+  }
+};
 
-// Create user
-const createUser = asyncHandler(async (req, res) => {
+  // Benutzer erstellen
+  createUser = asyncHandler(async (req, res) => {
     const {
-        email,
-        password,
-        role = 'restaurant_owner',
-        first_name,
-        last_name,
-        phone,
-        is_active = true
+      email,
+      password,
+      role = 'restaurant',
+      name,
+      first_name,
+      last_name,
+      phone,
+      is_active = true,
+      restaurant_id
     } = req.body;
 
-    // Check if email already exists
+    // Email prüfen
     const existingUser = await User.findByEmail(email);
     if (existingUser) {
-        throw new AppError('Ein Benutzer mit dieser E-Mail existiert bereits', 400);
+      throw new AppError('Ein Benutzer mit dieser E-Mail existiert bereits', 400);
     }
 
-    // Create user
+    // Passwort hashen
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Benutzer erstellen
     const user = await User.create({
-        email,
-        password,
-        role,
-        first_name,
-        last_name,
-        phone,
-        is_active,
-        is_email_verified: true, // Admin created users are pre-verified
-        created_by: req.user.id
+      email,
+      password: hashedPassword,
+      role,
+      name: name || `${first_name} ${last_name}`.trim(),
+      first_name,
+      last_name,
+      phone,
+      is_active,
+      is_email_verified: true, // Admin-erstellte Benutzer sind verifiziert
+      restaurant_id
     });
 
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
+    // Activity Log
+    if (ActivityLog && ActivityLog.logActivity) {
+      await ActivityLog.logActivity({
+        user_id: req.user?.id,
         action: 'user_created',
         category: 'user',
         entity_type: 'User',
         entity_id: user.id,
         metadata: { email, role }
-    });
+      });
+    }
+
+    logger.info(`User created: ${email}`);
 
     res.status(201).json({
-        success: true,
-        message: 'Benutzer erfolgreich erstellt',
-        data: {
-            user: user.toSafeObject(),
-            credentials: {
-                email,
-                password,
-                message: 'Bitte notieren Sie die Zugangsdaten'
-            }
+      success: true,
+      message: 'Benutzer erfolgreich erstellt',
+      data: {
+        user: user.toSafeObject ? user.toSafeObject() : user,
+        credentials: {
+          email,
+          password,
+          message: 'Bitte notieren Sie die Zugangsdaten'
         }
+      }
     });
-});
+  });
 
-// Update user
-const updateUser = asyncHandler(async (req, res) => {
+  // Benutzer aktualisieren
+  updateUser = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
     const user = await User.findByPk(id);
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      throw new AppError('Benutzer nicht gefunden', 404);
     }
 
-    const oldValues = user.toJSON();
-
-    // Prevent changing super admin role
+    // Super Admin schützen
     if (user.role === 'super_admin' && updates.role && updates.role !== 'super_admin') {
-        throw new AppError('Super Admin Rolle kann nicht geändert werden', 400);
+      throw new AppError('Super Admin Rolle kann nicht geändert werden', 400);
     }
 
-    // Allowed fields for update
+    // Erlaubte Felder
     const allowedFields = [
-        'email', 'role', 'first_name', 'last_name', 'phone',
-        'is_active', 'is_email_verified', 'settings'
+      'email', 'role', 'name', 'first_name', 'last_name', 
+      'phone', 'is_active', 'is_email_verified', 'restaurant_id'
     ];
 
     const filteredUpdates = {};
     allowedFields.forEach(field => {
-        if (updates[field] !== undefined) {
-            filteredUpdates[field] = updates[field];
-        }
+      if (updates[field] !== undefined) {
+        filteredUpdates[field] = updates[field];
+      }
     });
 
-    await user.update({
-        ...filteredUpdates,
-        updated_by: req.user.id
-    });
+    await user.update(filteredUpdates);
 
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
+    // Activity Log
+    if (ActivityLog && ActivityLog.logActivity) {
+      await ActivityLog.logActivity({
+        user_id: req.user?.id,
         action: 'user_updated',
         category: 'user',
         entity_type: 'User',
         entity_id: user.id,
-        old_values: oldValues,
         new_values: filteredUpdates
-    });
+      });
+    }
 
     res.json({
-        success: true,
-        message: 'Benutzer erfolgreich aktualisiert',
-        data: user.toSafeObject()
+      success: true,
+      message: 'Benutzer erfolgreich aktualisiert',
+      data: user.toSafeObject ? user.toSafeObject() : user
     });
-});
+  });
 
-// Delete user
-const deleteUser = asyncHandler(async (req, res) => {
+  // Benutzer löschen
+  deleteUser = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const user = await User.findByPk(id);
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      throw new AppError('Benutzer nicht gefunden', 404);
     }
 
-    // Prevent deleting super admin
+    // Super Admin schützen
     if (user.role === 'super_admin') {
-        throw new AppError('Super Admin kann nicht gelöscht werden', 400);
+      throw new AppError('Super Admin kann nicht gelöscht werden', 400);
     }
 
-    // Soft delete
+    // Soft Delete
     await user.update({
-        is_active: false,
-        deleted_at: new Date(),
-        updated_by: req.user.id
-    });
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        action: 'user_deleted',
-        category: 'user',
-        entity_type: 'User',
-        entity_id: user.id
+      is_active: false,
+      deleted_at: new Date()
     });
 
     res.json({
-        success: true,
-        message: 'Benutzer erfolgreich gelöscht'
+      success: true,
+      message: 'Benutzer erfolgreich gelöscht'
     });
-});
+  });
 
-// Reset user password
-const resetUserPassword = asyncHandler(async (req, res) => {
+  // Passwort zurücksetzen
+  resetUserPassword = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { new_password, send_email = false } = req.body;
+    const { new_password } = req.body;
 
     const user = await User.findByPk(id);
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      throw new AppError('Benutzer nicht gefunden', 404);
     }
 
-    // Generate password if not provided
+    // Passwort generieren falls nicht vorhanden
     const password = new_password || crypto.randomBytes(8).toString('hex');
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Update password
-    user.password = password;
-    user.password_reset_token = null;
-    user.password_reset_expires = null;
-    await user.save();
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        action: 'user_password_reset',
-        category: 'user',
-        entity_type: 'User',
-        entity_id: user.id,
-        metadata: { by_admin: true }
+    await user.update({
+      password: hashedPassword,
+      password_reset_token: null,
+      password_reset_expires: null
     });
 
     res.json({
-        success: true,
-        message: 'Passwort erfolgreich zurückgesetzt',
-        data: {
-            email: user.email,
-            new_password: password,
-            message: send_email ? 'Passwort wurde per E-Mail gesendet' : 'Bitte teilen Sie dem Benutzer das neue Passwort mit'
-        }
+      success: true,
+      message: 'Passwort erfolgreich zurückgesetzt',
+      data: {
+        email: user.email,
+        new_password: password,
+        message: 'Bitte teilen Sie dem Benutzer das neue Passwort mit'
+      }
     });
-});
+  });
 
-// Toggle user status
-const toggleUserStatus = asyncHandler(async (req, res) => {
+  // Benutzer-Status umschalten
+  toggleUserStatus = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { is_active, reason } = req.body;
 
     const user = await User.findByPk(id);
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      throw new AppError('Benutzer nicht gefunden', 404);
     }
 
-    // Prevent deactivating super admin
+    // Super Admin schützen
     if (user.role === 'super_admin' && !is_active) {
-        throw new AppError('Super Admin kann nicht deaktiviert werden', 400);
+      throw new AppError('Super Admin kann nicht deaktiviert werden', 400);
     }
 
-    await user.update({
-        is_active,
-        updated_by: req.user.id
-    });
+    await user.update({ is_active });
 
-    // If deactivating, also deactivate user's restaurants
+    // Restaurants deaktivieren wenn Benutzer deaktiviert wird
     if (!is_active) {
-        await Restaurant.update(
-            { 
-                is_active: false,
-                deactivation_reason: 'Owner account deactivated'
-            },
-            { 
-                where: { owner_id: id }
-            }
-        );
+      await Restaurant.update(
+        { is_active: false },
+        { where: { user_id: id } }
+      );
     }
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        action: is_active ? 'user_activated' : 'user_deactivated',
-        category: 'user',
-        entity_type: 'User',
-        entity_id: user.id,
-        metadata: { reason }
-    });
 
     res.json({
-        success: true,
-        message: `Benutzer erfolgreich ${is_active ? 'aktiviert' : 'deaktiviert'}`,
-        data: user.toSafeObject()
+      success: true,
+      message: `Benutzer erfolgreich ${is_active ? 'aktiviert' : 'deaktiviert'}`,
+      data: user.toSafeObject ? user.toSafeObject() : user
     });
-});
+  });
 
-// Unlock user account
-const unlockUser = asyncHandler(async (req, res) => {
+  // Benutzer entsperren
+  unlockUser = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const user = await User.findByPk(id);
     if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
+      throw new AppError('Benutzer nicht gefunden', 404);
     }
 
-    await user.resetLoginAttempts();
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        action: 'user_unlocked',
-        category: 'user',
-        entity_type: 'User',
-        entity_id: user.id
-    });
+    if (user.resetLoginAttempts) {
+      await user.resetLoginAttempts();
+    } else {
+      await user.update({
+        login_attempts: 0,
+        locked_until: null
+      });
+    }
 
     res.json({
-        success: true,
-        message: 'Benutzer-Account erfolgreich entsperrt'
+      success: true,
+      message: 'Benutzer-Account erfolgreich entsperrt'
     });
-});
+  });
 
-// Get user statistics
-const getUserStatistics = asyncHandler(async (req, res) => {
-    const [
+  // Benutzer-Statistiken
+  getUserStatistics = asyncHandler(async (req, res) => {
+    const totalUsers = await User.count();
+    const activeUsers = await User.count({ where: { is_active: true } });
+    const verifiedUsers = await User.count({ where: { is_email_verified: true } });
+    
+    // Benutzer nach Rolle
+    const adminCount = await User.count({ where: { role: 'admin' } });
+    const restaurantCount = await User.count({ where: { role: 'restaurant' } });
+
+    res.json({
+      success: true,
+      data: {
         totalUsers,
         activeUsers,
+        inactiveUsers: totalUsers - activeUsers,
         verifiedUsers,
-        usersByRole,
-        recentSignups,
-        activeToday
-    ] = await Promise.all([
-        User.count(),
-        
-        User.count({ where: { is_active: true } }),
-        
-        User.count({ where: { is_email_verified: true } }),
-        
-        User.findAll({
-            attributes: [
-                'role',
-                [sequelize.fn('COUNT', '*'), 'count']
-            ],
-            group: ['role']
-        }),
-        
-        User.count({
-            where: {
-                created_at: {
-                    [sequelize.Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-                }
-            }
-        }),
-        
-        User.count({
-            where: {
-                last_login_at: {
-                    [sequelize.Op.gte]: new Date().setHours(0, 0, 0, 0)
-                }
-            }
-        })
-    ]);
-
-    res.json({
-        success: true,
-        data: {
-            totalUsers,
-            activeUsers,
-            inactiveUsers: totalUsers - activeUsers,
-            verifiedUsers,
-            unverifiedUsers: totalUsers - verifiedUsers,
-            usersByRole,
-            recentSignups,
-            activeToday
+        unverifiedUsers: totalUsers - verifiedUsers,
+        usersByRole: {
+          admin: adminCount,
+          restaurant: restaurantCount
         }
+      }
     });
-});
+  });
 
-// Impersonate user (login as user)
-const impersonateUser = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    const user = await User.findByPk(id);
-    if (!user) {
-        throw new AppError('Benutzer nicht gefunden', 404);
-    }
-
-    if (user.role === 'super_admin') {
-        throw new AppError('Super Admin kann nicht impersoniert werden', 400);
-    }
-
-    // Generate token for the user
-    const { generateToken } = require('../../middleware/auth.middleware');
-    const { sessionStore } = require('../../config/redis');
-    
-    const sessionId = crypto.randomBytes(32).toString('hex');
-    const token = generateToken(user.id, sessionId);
-
-    // Store session
-    await sessionStore.save(sessionId, {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        impersonatedBy: req.user.id,
-        loginAt: new Date(),
-        ip: req.ip,
-        userAgent: req.get('user-agent')
-    });
-
-    // Log activity
-    await ActivityLog.logActivity({
-        user_id: req.user.id,
-        action: 'user_impersonated',
-        category: 'user',
-        severity: 'warning',
-        entity_type: 'User',
-        entity_id: user.id
-    });
-
-    res.json({
-        success: true,
-        message: 'Impersonierung erfolgreich',
-        data: {
-            user: user.toSafeObject(),
-            token,
-            warning: 'Sie agieren jetzt als dieser Benutzer'
-        }
-    });
-});
-
-// Bulk update users
-const bulkUpdateUsers = asyncHandler(async (req, res) => {
+  // Bulk Update
+  bulkUpdateUsers = asyncHandler(async (req, res) => {
     const { user_ids, action, data } = req.body;
 
     if (!user_ids || !Array.isArray(user_ids)) {
-        throw new AppError('User IDs erforderlich', 400);
+      throw new AppError('User IDs erforderlich', 400);
     }
 
     const results = {
-        success: [],
-        failed: []
+      success: [],
+      failed: []
     };
 
     for (const id of user_ids) {
-        try {
-            const user = await User.findByPk(id);
-            
-            if (!user) {
-                results.failed.push({ id, reason: 'Nicht gefunden' });
-                continue;
-            }
-
-            // Skip super admins
-            if (user.role === 'super_admin') {
-                results.failed.push({ id, reason: 'Super Admin kann nicht bulk-updated werden' });
-                continue;
-            }
-
-            switch (action) {
-                case 'activate':
-                    user.is_active = true;
-                    await user.save();
-                    break;
-                case 'deactivate':
-                    user.is_active = false;
-                    await user.save();
-                    break;
-                case 'verify_email':
-                    user.is_email_verified = true;
-                    user.email_verified_at = new Date();
-                    await user.save();
-                    break;
-                case 'change_role':
-                    if (data?.role) {
-                        user.role = data.role;
-                        await user.save();
-                    }
-                    break;
-                default:
-                    results.failed.push({ id, reason: 'Ungültige Aktion' });
-                    continue;
-            }
-
-            results.success.push(id);
-        } catch (error) {
-            results.failed.push({ id, reason: error.message });
+      try {
+        const user = await User.findByPk(id);
+        
+        if (!user) {
+          results.failed.push({ id, reason: 'Nicht gefunden' });
+          continue;
         }
+
+        // Super Admin überspringen
+        if (user.role === 'super_admin') {
+          results.failed.push({ id, reason: 'Super Admin kann nicht bulk-updated werden' });
+          continue;
+        }
+
+        switch (action) {
+          case 'activate':
+            await user.update({ is_active: true });
+            break;
+          case 'deactivate':
+            await user.update({ is_active: false });
+            break;
+          case 'verify_email':
+            await user.update({ 
+              is_email_verified: true,
+              email_verified_at: new Date()
+            });
+            break;
+          case 'change_role':
+            if (data?.role) {
+              await user.update({ role: data.role });
+            }
+            break;
+          default:
+            results.failed.push({ id, reason: 'Ungültige Aktion' });
+            continue;
+        }
+
+        results.success.push(id);
+      } catch (error) {
+        results.failed.push({ id, reason: error.message });
+      }
     }
 
     res.json({
-        success: true,
-        message: `${results.success.length} erfolgreich, ${results.failed.length} fehlgeschlagen`,
-        data: results
+      success: true,
+      message: `${results.success.length} erfolgreich, ${results.failed.length} fehlgeschlagen`,
+      data: results
     });
-});
+  });
 
-module.exports = {
-    getAllUsers,
-    getUserDetails,
-    createUser,
-    updateUser,
-    deleteUser,
-    resetUserPassword,
-    toggleUserStatus,
-    unlockUser,
-    getUserStatistics,
-    impersonateUser,
-    bulkUpdateUsers
-};
+  // Impersonate User (vereinfacht)
+  impersonateUser = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const user = await User.findByPk(id);
+    if (!user) {
+      throw new AppError('Benutzer nicht gefunden', 404);
+    }
+
+    if (user.role === 'super_admin') {
+      throw new AppError('Super Admin kann nicht impersoniert werden', 400);
+    }
+
+    // JWT Token generieren
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        restaurant_id: user.restaurant_id,
+        impersonatedBy: req.user?.id
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '1h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Impersonierung erfolgreich',
+      data: {
+        user: user.toSafeObject ? user.toSafeObject() : user,
+        token,
+        warning: 'Sie agieren jetzt als dieser Benutzer (1 Stunde gültig)'
+      }
+    });
+  });
+}
+
+module.exports = new UserAdminController();

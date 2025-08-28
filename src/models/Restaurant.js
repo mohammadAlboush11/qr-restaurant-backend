@@ -11,6 +11,11 @@ const Restaurant = sequelize.define('Restaurant', {
     type: DataTypes.STRING,
     allowNull: false
   },
+  slug: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
   email: {
     type: DataTypes.STRING,
     allowNull: false,
@@ -23,15 +28,7 @@ const Restaurant = sequelize.define('Restaurant', {
     allowNull: true
   },
   address: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  google_place_id: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  google_business_url: {
-    type: DataTypes.STRING,
+    type: DataTypes.TEXT,
     allowNull: true
   },
   is_active: {
@@ -39,21 +36,41 @@ const Restaurant = sequelize.define('Restaurant', {
     defaultValue: true
   },
   subscription_status: {
-    type: DataTypes.ENUM('active', 'inactive', 'suspended'),
-    defaultValue: 'inactive'
+    type: DataTypes.ENUM('active', 'inactive', 'expired', 'trial'),
+    defaultValue: 'trial' // Start mit Trial!
   },
   subscription_end_date: {
     type: DataTypes.DATE,
     allowNull: true
   },
-  last_review_count: {
-    type: DataTypes.INTEGER,
-    defaultValue: 0
-  },
-  last_review_check: {
-    type: DataTypes.DATE,
+  google_place_id: {
+    type: DataTypes.STRING,
     allowNull: true
+  },
+  google_review_url: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  notification_email: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  settings: {
+    type: DataTypes.JSON,
+    defaultValue: {}
+  },
+  user_id: { // WICHTIG: user_id statt owner_id
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'users',
+      key: 'id'
+    }
   }
+}, {
+  tableName: 'restaurants',
+  underscored: true,
+  timestamps: true
 });
 
 module.exports = Restaurant;

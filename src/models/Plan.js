@@ -1,18 +1,13 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
-const { v4: uuidv4 } = require('uuid');
 
-const Table = sequelize.define('Table', {
+const Plan = sequelize.define('Plan', {
   id: {
     type: DataTypes.INTEGER,
     primaryKey: true,
     autoIncrement: true
   },
-  restaurant_id: {
-    type: DataTypes.INTEGER,
-    allowNull: false
-  },
-  table_number: {
+  name: {
     type: DataTypes.STRING,
     allowNull: false
   },
@@ -20,26 +15,39 @@ const Table = sequelize.define('Table', {
     type: DataTypes.TEXT,
     allowNull: true
   },
-  qr_code: {  // DIES IST DAS PROBLEM - Umbenennen zu qr_code_string
-    type: DataTypes.TEXT,
+  price: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false
+  },
+  duration_months: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 1
+  },
+  max_tables: {
+    type: DataTypes.INTEGER,
     allowNull: true
   },
-  scan_count: {
+  max_scans: {
     type: DataTypes.INTEGER,
-    defaultValue: 0
+    allowNull: true
+  },
+  features: {
+    type: DataTypes.JSON,
+    defaultValue: []
   },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
-  last_scan_at: {
-    type: DataTypes.DATE,
-    allowNull: true
+  display_order: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
   }
 }, {
-  tableName: 'tables',
+  tableName: 'plans',
   underscored: true,
   timestamps: true
 });
 
-module.exports = Table;
+module.exports = Plan;
