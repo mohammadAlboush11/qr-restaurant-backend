@@ -101,7 +101,12 @@ const Restaurant = sequelize.define('Restaurant', {
   owner_name: {
     type: DataTypes.STRING,
     allowNull: true
-  }
+  },
+  google_place_id: {
+  type: DataTypes.STRING,
+  allowNull: true,
+  comment: 'Google Places API ID für Review-Monitoring'
+}
 }, {
   tableName: 'restaurants',
   underscored: true,
