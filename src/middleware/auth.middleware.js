@@ -1,7 +1,15 @@
 const jwt = require('jsonwebtoken');
 const { User, Restaurant } = require('../models');
 
-const JWT_SECRET = process.env.JWT_SECRET ;
+const JWT_SECRET = process.env.JWT_SECRET; // Kein Leerzeichen vor ;
+
+// Sicherheitscheck
+if (!JWT_SECRET) {
+  console.error('❌ JWT_SECRET nicht gesetzt!');
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1); // App beenden in Production
+  }
+}
 
 const authenticateToken = async (req, res, next) => {
   try {

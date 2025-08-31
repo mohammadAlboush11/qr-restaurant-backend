@@ -29,8 +29,17 @@ async function initDatabase() {
     console.log('✅ Alle Tabellen wurden erstellt/aktualisiert');
     
     // Standard-Admin erstellen
-    const adminEmail = process.env.SUPER_ADMIN_EMAIL ;
-    const adminPassword = process.env.SUPER_ADMIN_PASSWORD;
+    // Standard-Admin erstellen
+    const adminEmail = process.env.ADMIN_EMAIL; // Kein Leerzeichen vor ;
+    const adminPassword = process.env.ADMIN_PASSWORD; // Kein Leerzeichen vor ;
+
+    if (!adminEmail || !adminPassword) {
+      console.error('❌ Admin Credentials fehlen in Environment Variables');
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('ADMIN_EMAIL und ADMIN_PASSWORD müssen gesetzt sein!');
+      }
+      return; // Skip admin creation
+    }
     
     const existingAdmin = await User.findOne({
       where: { email: adminEmail }

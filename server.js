@@ -165,7 +165,19 @@ if (process.env.NODE_ENV !== 'production') {
       logger.info('✅ Database connection established');
       
       // Database sync
-      const dbPath = path.join(__dirname, 'database.sqlite');
+      // Database path from ENV or default
+      const dbPath = process.env.DATABASE_PATH 
+        ? path.resolve(process.env.DATABASE_PATH)
+        : path.join(__dirname, 'database.sqlite');
+
+      logger.info(`📁 Database path: ${dbPath}`);
+
+      // Ensure directory exists
+      const dbDir = path.dirname(dbPath);
+      if (!fs.existsSync(dbDir)) {
+        fs.mkdirSync(dbDir, { recursive: true });
+        logger.info(`📁 Created database directory: ${dbDir}`);
+      }
       const dbExists = fs.existsSync(dbPath);
       
       if (!dbExists) {
@@ -181,12 +193,22 @@ if (process.env.NODE_ENV !== 'production') {
       }
 
       // Create default admin user
-      const adminEmail = process.env.ADMIN_EMAIL ;
-      const adminPassword = process.env.ADMIN_PASSWORD ;
-      
-      const existingAdmin = await User.findOne({
-        where: { email: adminEmail }
-      });
+      // Standard-Admin erstellen
+      const adminEmail = process.env.ADMIN_EMAIL;
+      const adminPassword = process.env.ADMIN_PASSWORD;
+
+      // WICHTIG: Prüfen ob Werte existieren
+      if (!adminEmail || !adminPassword) {
+        logger.error('❌ KRITISCH: ADMIN_EMAIL oder ADMIN_PASSWORD nicht gesetzt!');
+        if (process.env.NODE_ENV === 'production') {
+          // In Production MUSS es gesetzt sein
+          throw new Error('Admin Credentials müssen in Environment Variables gesetzt werden!');
+        } else {
+          // Nur in Development überspringen
+          logger.warn('⚠️ Admin wird nicht erstellt - Credentials fehlen');
+          return; // Admin-Erstellung überspringen
+        }
+      }
 
       if (!existingAdmin) {
         const hashedPassword = await bcrypt.hash(adminPassword, 12);
