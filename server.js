@@ -21,7 +21,7 @@ const logger = {
   error: (msg, data = {}) => console.error(`❌ ERROR: ${msg}`, data),
   debug: (msg, data = {}) => {
     if (process.env.NODE_ENV === 'development') {
-      console.log(`🐛 DEBUG: ${msg}`, data);
+      console.log(`🛠 DEBUG: ${msg}`, data);
     }
   }
 };
@@ -32,26 +32,19 @@ function validateSecurityConfig() {
   const errors = [];
 
   // JWT Secret Check
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-    if (process.env.NODE_ENV === 'production') {
-      errors.push('JWT_SECRET muss mindestens 32 Zeichen lang sein');
-    } else {
-      warnings.push('JWT_SECRET unsicher - nur für Development');
-      process.env.JWT_SECRET = process.env.JWT_SECRET;
-    }
+  if (!process.env.JWT_SECRET) {
+    errors.push('JWT_SECRET ist nicht gesetzt');
+  } else if (process.env.JWT_SECRET.length < 32) {
+    errors.push('JWT_SECRET muss mindestens 32 Zeichen lang sein');
   }
 
-  // Admin Password Check
-  const weakPasswords = ['Admin123!', 'admin', 'password', '123456'];
-  if (weakPasswords.includes(process.env.ADMIN_PASSWORD)) {
-    warnings.push('Admin-Passwort ist schwach - bitte ändern');
-    
-    if (process.env.NODE_ENV === 'production') {
-      const crypto = require('crypto');
-      const newPassword = crypto.randomBytes(16).toString('hex');
-      process.env.ADMIN_PASSWORD = newPassword;
-      logger.warn('Admin-Passwort automatisch generiert:', newPassword);
-    }
+  // Admin Credentials Check
+  if (!process.env.ADMIN_EMAIL) {
+    errors.push('ADMIN_EMAIL ist nicht gesetzt');
+  }
+  
+  if (!process.env.ADMIN_PASSWORD) {
+    errors.push('ADMIN_PASSWORD ist nicht gesetzt');
   }
 
   // SMTP Config Check
@@ -79,19 +72,7 @@ async function startServer() {
           errors: process.env.NODE_ENV === 'development' ? errors : undefined
         });
       });
-    // Debug-Route für Tests
-if (process.env.NODE_ENV !== 'production') {
-  app.get('/api/debug/qrcodes', async (req, res) => {
-    const { QRCode, Table } = require('./src/models');
-    const codes = await QRCode.findAll({
-      include: [{
-        model: Table,
-        as: 'table'
-      }]
-    });
-    res.json(codes);
-  });
-}  
+      
       app.listen(PORT, () => {
         logger.warn(`Server im WARTUNGSMODUS auf Port ${PORT}`);
       });
@@ -115,11 +96,13 @@ if (process.env.NODE_ENV !== 'production') {
         const allowedOrigins = [
           'https://lt-express.de',
           'http://lt-express.de',
-          process.env.FRONTEND_URL
+          process.env.FRONTEND_URL,
+          'http://localhost:3000',
+          'http://localhost:5173'
         ].filter(Boolean);
         
-        // In Produktion strenger
-        if (!origin || allowedOrigins.includes(origin)) {
+        // Allow requests with no origin (mobile apps, Postman)
+        if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
           callback(null, true);
         } else {
           callback(new Error('CORS nicht erlaubt'));
@@ -127,7 +110,8 @@ if (process.env.NODE_ENV !== 'production') {
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization']
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      exposedHeaders: ['Content-Disposition']
     };
 
     app.use(cors(corsOptions));
@@ -164,7 +148,6 @@ if (process.env.NODE_ENV !== 'production') {
       await sequelize.authenticate();
       logger.info('✅ Database connection established');
       
-      // Database sync
       // Database path from ENV or default
       const dbPath = process.env.DATABASE_PATH 
         ? path.resolve(process.env.DATABASE_PATH)
@@ -178,6 +161,7 @@ if (process.env.NODE_ENV !== 'production') {
         fs.mkdirSync(dbDir, { recursive: true });
         logger.info(`📁 Created database directory: ${dbDir}`);
       }
+      
       const dbExists = fs.existsSync(dbPath);
       
       if (!dbExists) {
@@ -193,41 +177,45 @@ if (process.env.NODE_ENV !== 'production') {
       }
 
       // Create default admin user
-      // Standard-Admin erstellen
       const adminEmail = process.env.ADMIN_EMAIL;
       const adminPassword = process.env.ADMIN_PASSWORD;
 
-      // WICHTIG: Prüfen ob Werte existieren
-      if (!adminEmail || !adminPassword) {
-        logger.error('❌ KRITISCH: ADMIN_EMAIL oder ADMIN_PASSWORD nicht gesetzt!');
-        if (process.env.NODE_ENV === 'production') {
-          // In Production MUSS es gesetzt sein
-          throw new Error('Admin Credentials müssen in Environment Variables gesetzt werden!');
-        } else {
-          // Nur in Development überspringen
-          logger.warn('⚠️ Admin wird nicht erstellt - Credentials fehlen');
-          return; // Admin-Erstellung überspringen
-        }
-      }
+      // Admin-Erstellung nur wenn beide Werte vorhanden
+      if (adminEmail && adminPassword) {
+        try {
+          // Prüfe ob Admin bereits existiert
+          const existingAdmin = await User.findOne({
+            where: { email: adminEmail.toLowerCase().trim() }
+          });
 
-      if (!existingAdmin) {
-        const hashedPassword = await bcrypt.hash(adminPassword, 12);
-        const admin = await User.create({
-          email: adminEmail,
-          password: hashedPassword,
-          name: 'Super Admin',
-          role: 'super_admin',
-          is_active: true,
-          is_email_verified: true,
-          email_verified_at: new Date()
-        });
-        logger.info(`✅ Admin created: ${adminEmail}`);
-        
-        if (process.env.NODE_ENV === 'development') {
-          logger.info(`🔑 Admin password: ${adminPassword}`);
+          if (!existingAdmin) {
+            const hashedPassword = await bcrypt.hash(adminPassword, 12);
+            const admin = await User.create({
+              email: adminEmail.toLowerCase().trim(),
+              password: hashedPassword,
+              name: 'Super Admin',
+              role: 'super_admin',
+              is_active: true,
+              is_email_verified: true,
+              email_verified_at: new Date()
+            });
+            logger.info(`✅ Admin created: ${adminEmail}`);
+            
+            // Nur in Development das Passwort loggen
+            if (process.env.NODE_ENV === 'development') {
+              logger.info(`🔑 Admin password: ${adminPassword}`);
+            }
+          } else {
+            logger.info(`ℹ️ Admin user already exists: ${adminEmail}`);
+          }
+        } catch (adminError) {
+          logger.error('Admin creation error:', adminError);
         }
       } else {
-        logger.info('ℹ️ Admin user already exists');
+        logger.warn('⚠️ Admin credentials nicht gesetzt - Admin wurde nicht erstellt');
+        if (process.env.NODE_ENV === 'production') {
+          logger.error('❌ KRITISCH: Admin muss in Production erstellt werden!');
+        }
       }
 
       // Create default plans if they don't exist
@@ -275,7 +263,30 @@ if (process.env.NODE_ENV !== 'production') {
       }
     }
 
-    // JSON Parse Error Handler (must be before routes)
+    // Debug-Route für Tests (nur Development)
+    if (process.env.NODE_ENV !== 'production') {
+      app.get('/api/debug/admin', async (req, res) => {
+        try {
+          const { User } = require('./src/models');
+          const admins = await User.findAll({
+            where: { role: ['admin', 'super_admin'] },
+            attributes: ['id', 'email', 'role', 'is_active', 'created_at']
+          });
+          res.json({ 
+            admins,
+            env_check: {
+              has_admin_email: !!process.env.ADMIN_EMAIL,
+              has_admin_password: !!process.env.ADMIN_PASSWORD,
+              has_jwt: !!process.env.JWT_SECRET
+            }
+          });
+        } catch (error) {
+          res.status(500).json({ error: error.message });
+        }
+      });
+    }
+
+    // JSON Parse Error Handler
     app.use((err, req, res, next) => {
       if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
         logger.error('Bad JSON:', err.message);
