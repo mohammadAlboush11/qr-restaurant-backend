@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: qr-restaurant-backend
+    env: node
+    buildCommand: |
+      echo "Installing dependencies..." &&
+      npm install &&
+      echo "Creating database directory..." &&
+      mkdir -p data &&
+      echo "Build complete"
+    startCommand: node server.js
+    envVars:
+      # Server Configuration
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: BACKEND_URL
+        value: https://qr-restaurant-backend.onrender.com
+        
+      # Database
+      - key: DATABASE_PATH
+        value: ./data/database.sqlite
+        
+      # JWT Secret - MUST BE CHANGED
+      - key: JWT_SECRET
+        generateValue: true # Auto-generate secure value
+        
+      # Frontend URL
+      - key: FRONTEND_URL
+        value: http://lt-express.de
+        
+      # Admin Account - DEFAULT VALUES (Change in Dashboard)
+      - key: ADMIN_EMAIL
+        value: 
+      - key: ADMIN_PASSWORD
+        value: 
+        
+      # SMTP Configuration (Strato)
+      - key: SMTP_HOST
+        value: smtp.strato.de
+      - key: SMTP_PORT
+        value: "465"
+      - key: SMTP_USER
+        sync: false # Set manually in dashboard
+      - key: SMTP_PASS
+        sync: false # Set manually in dashboard
+        
+      # Google Places API (Optional)
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false # Set manually if available
+        
+     
+    # Persistent disk for SQLite database
+    disk:
+      name: qr-restaurant-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
