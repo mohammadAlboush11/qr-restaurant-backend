@@ -1,5 +1,5 @@
 // backend/server.js
-// AKTUALISIERTE VERSION MIT SMART REVIEW SERVICE
+// VOLLSTÄNDIGE VERSION MIT AUSFÜHRLICHEM LOGGING
 
 require('dotenv').config();
 const express = require('express');
@@ -12,31 +12,61 @@ const bcrypt = require('bcryptjs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// ===== STARTUP LOGGING =====
+console.log('='.repeat(60));
+console.log('🚀 STARTING QR RESTAURANT BACKEND');
+console.log('='.repeat(60));
+console.log(`📅 Time: ${new Date().toISOString()}`);
+console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`🔧 Node Version: ${process.version}`);
+console.log(`📁 Working Directory: ${process.cwd()}`);
+console.log('='.repeat(60));
+
+// ===== ENVIRONMENT CHECK =====
+console.log('\n📋 ENVIRONMENT VARIABLES CHECK:');
+console.log(`   DATABASE_PATH: ${process.env.DATABASE_PATH || '❌ NOT SET'}`);
+console.log(`   GOOGLE_PLACES_API_KEY: ${process.env.GOOGLE_PLACES_API_KEY ? '✅ Set' : '❌ Missing'}`);
+console.log(`   JWT_SECRET: ${process.env.JWT_SECRET ? '✅ Set' : '❌ Missing'}`);
+console.log(`   ADMIN_EMAIL: ${process.env.ADMIN_EMAIL || '❌ NOT SET'}`);
+console.log(`   SMTP_USER: ${process.env.SMTP_USER ? '✅ Set' : '❌ Missing'}`);
+console.log(`   RENDER: ${process.env.RENDER || 'false'}`);
+console.log('='.repeat(60));
+
 // Logger
 const logger = {
-  info: (msg, data = {}) => console.log(`ℹ️ INFO: ${msg}`, data),
-  warn: (msg, data = {}) => console.log(`⚠️ WARN: ${msg}`, data),
-  error: (msg, data = {}) => console.error(`❌ ERROR: ${msg}`, data),
+  info: (msg, data = {}) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ℹ️ INFO: ${msg}`, data);
+  },
+  warn: (msg, data = {}) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ⚠️ WARN: ${msg}`, data);
+  },
+  error: (msg, data = {}) => {
+    const timestamp = new Date().toISOString();
+    console.error(`[${timestamp}] ❌ ERROR: ${msg}`, data);
+  },
   debug: (msg, data = {}) => {
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`🛠 DEBUG: ${msg}`, data);
+    if (process.env.NODE_ENV === 'development' || process.env.DEBUG === 'true') {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] 🛠 DEBUG: ${msg}`, data);
     }
   }
 };
 
 // Security Configuration
 function validateSecurityConfig() {
+  logger.info('Validating security configuration...');
+  
   const warnings = [];
   const errors = [];
 
-  // JWT Secret Check
   if (!process.env.JWT_SECRET) {
     errors.push('JWT_SECRET ist nicht gesetzt');
   } else if (process.env.JWT_SECRET.length < 32) {
     errors.push('JWT_SECRET muss mindestens 32 Zeichen lang sein');
   }
 
-  // Admin Credentials Check
   if (!process.env.ADMIN_EMAIL) {
     errors.push('ADMIN_EMAIL ist nicht gesetzt');
   }
@@ -45,14 +75,12 @@ function validateSecurityConfig() {
     errors.push('ADMIN_PASSWORD ist nicht gesetzt');
   }
 
-  // SMTP Config Check
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     warnings.push('E-Mail-Service nicht konfiguriert - Review-Benachrichtigungen eingeschränkt');
   }
   
-  // Google API Check
   if (!process.env.GOOGLE_PLACES_API_KEY) {
-    warnings.push('Google Places API Key fehlt - Automatische Review-Erkennung deaktiviert');
+    warnings.push('Google Places API Key fehlt - Review-Monitoring deaktiviert');
   }
 
   return { warnings, errors };
@@ -61,13 +89,20 @@ function validateSecurityConfig() {
 // Start Server
 async function startServer() {
   try {
+    logger.info('Server initialization starting...');
+    
     // Security validation
     const { warnings, errors } = validateSecurityConfig();
     
-    warnings.forEach(w => logger.warn(w));
+    if (warnings.length > 0) {
+      console.log('\n⚠️ WARNINGS:');
+      warnings.forEach(w => console.log(`   - ${w}`));
+    }
     
     if (errors.length > 0 && process.env.NODE_ENV === 'production') {
-      logger.error('Kritische Konfigurationsfehler:', errors);
+      console.log('\n❌ CRITICAL ERRORS:');
+      errors.forEach(e => console.log(`   - ${e}`));
+      
       app.get('*', (req, res) => {
         res.status(503).json({
           success: false,
@@ -77,23 +112,20 @@ async function startServer() {
       });
       
       app.listen(PORT, () => {
-        logger.warn(`Server im WARTUNGSMODUS auf Port ${PORT}`);
+        logger.error(`Server im WARTUNGSMODUS auf Port ${PORT}`);
       });
       return;
     }
 
     // Security Headers
-    try {
-      app.use(helmet({
-        contentSecurityPolicy: false,
-        crossOriginEmbedderPolicy: false
-      }));
-      logger.info('Security headers aktiviert');
-    } catch (e) {
-      logger.warn('Helmet nicht installiert - Security Headers deaktiviert');
-    }
+    logger.info('Setting up security headers...');
+    app.use(helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false
+    }));
 
     // CORS Configuration
+    logger.info('Configuring CORS...');
     const corsOptions = {
       origin: function (origin, callback) {
         const allowedOrigins = [
@@ -104,7 +136,8 @@ async function startServer() {
           'http://localhost:5173'
         ].filter(Boolean);
         
-        // Allow requests with no origin (mobile apps, Postman)
+        logger.debug(`CORS check for origin: ${origin}`);
+        
         if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
           callback(null, true);
         } else {
@@ -121,99 +154,96 @@ async function startServer() {
     app.use(express.json({ limit: '10mb' }));
     app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-    // Request logging for development
-    if (process.env.NODE_ENV === 'development') {
+    // Request logging
+    if (process.env.NODE_ENV === 'development' || process.env.DEBUG === 'true') {
       app.use((req, res, next) => {
         const start = Date.now();
+        logger.debug(`Incoming: ${req.method} ${req.path}`);
         res.on('finish', () => {
           const duration = Date.now() - start;
-          logger.debug(`${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
+          logger.debug(`Completed: ${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
         });
         next();
       });
     }
 
-    // Health Check mit Database Info
-    app.get('/health', (req, res) => {
-      const { sequelize } = require('./src/models');
-      const dbPath = sequelize.databasePath || sequelize.config.storage;
-      const dbExists = fs.existsSync(dbPath);
-      const dbStats = dbExists ? fs.statSync(dbPath) : null;
+    // Health Check
+    app.get('/health', async (req, res) => {
+      logger.info('Health check requested');
       
-      res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development',
-        uptime: process.uptime(),
-        database: {
-          exists: dbExists,
-          path: dbPath,
-          size: dbStats ? `${(dbStats.size / 1024 / 1024).toFixed(2)} MB` : 'N/A',
-          lastModified: dbStats ? dbStats.mtime.toISOString() : 'N/A'
-        },
-        services: {
-          email: !!process.env.SMTP_USER && !!process.env.SMTP_PASS,
-          googleApi: !!process.env.GOOGLE_PLACES_API_KEY,
-          smartReview: 'active'
-        },
-        warnings: warnings.length > 0 ? warnings : undefined
-      });
+      try {
+        const { sequelize } = require('./src/models');
+        const dbPath = sequelize.databasePath || sequelize.config.storage || 'unknown';
+        const dbExists = fs.existsSync(dbPath);
+        const dbStats = dbExists ? fs.statSync(dbPath) : null;
+        
+        const healthData = {
+          status: 'healthy',
+          timestamp: new Date().toISOString(),
+          environment: process.env.NODE_ENV || 'development',
+          uptime: process.uptime(),
+          database: {
+            exists: dbExists,
+            path: dbPath,
+            size: dbStats ? `${(dbStats.size / 1024 / 1024).toFixed(2)} MB` : 'N/A',
+            lastModified: dbStats ? dbStats.mtime.toISOString() : 'N/A'
+          },
+          services: {
+            email: !!process.env.SMTP_USER && !!process.env.SMTP_PASS,
+            googleApi: !!process.env.GOOGLE_PLACES_API_KEY,
+            reviewMonitor: 'checking...'
+          }
+        };
+        
+        logger.info('Health check data:', healthData);
+        res.json(healthData);
+      } catch (error) {
+        logger.error('Health check error:', error);
+        res.status(500).json({ status: 'error', message: error.message });
+      }
     });
 
-    // Database Initialization
+    // ===== DATABASE INITIALIZATION =====
+    console.log('\n' + '='.repeat(60));
+    console.log('📊 DATABASE INITIALIZATION');
+    console.log('='.repeat(60));
+    
     try {
-      const { sequelize, User, Restaurant, Table, Plan, QRCode, Scan } = require('./src/models');
+      logger.info('Loading database models...');
+      
+      // WICHTIG: Models laden löst database.js aus
+      const { sequelize, User, Restaurant, Table, Plan, QRCode, Scan, ReviewNotification } = require('./src/models');
+      
+      logger.info('Models loaded successfully');
+      logger.info('Testing database connection...');
       
       await sequelize.authenticate();
       logger.info('✅ Database connection established');
       
-      // Get database path from sequelize config
-      const dbPath = sequelize.databasePath || sequelize.config.storage;
+      // Database Info
+      const dbPath = sequelize.databasePath || sequelize.config.storage || 'unknown';
       logger.info(`📁 Database path: ${dbPath}`);
       
       const dbExists = fs.existsSync(dbPath);
       
       if (!dbExists) {
-        logger.info('🆕 Creating new database...');
+        logger.warn('🆕 Database does not exist - creating new database...');
         await sequelize.sync({ force: true });
+        logger.info('✅ New database created');
       } else {
         logger.info('✅ Using existing database');
         const stats = fs.statSync(dbPath);
         logger.info(`   Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
         logger.info(`   Last modified: ${stats.mtime.toISOString()}`);
         
-        // Schema-Updates ohne Datenverlust
+        // Schema update without data loss
+        logger.info('Updating database schema...');
         await sequelize.sync({ alter: true });
-      }
-      
-      // Füge neue Felder zum Scan Model hinzu (falls noch nicht vorhanden)
-      try {
-        await sequelize.query(`
-          ALTER TABLE scans ADD COLUMN IF NOT EXISTS processed BOOLEAN DEFAULT FALSE;
-        `).catch(() => {});
-        
-        await sequelize.query(`
-          ALTER TABLE scans ADD COLUMN IF NOT EXISTS processed_at DATETIME;
-        `).catch(() => {});
-        
-        await sequelize.query(`
-          ALTER TABLE scans ADD COLUMN IF NOT EXISTS resulted_in_review BOOLEAN DEFAULT FALSE;
-        `).catch(() => {});
-        
-        await sequelize.query(`
-          ALTER TABLE scans ADD COLUMN IF NOT EXISTS review_details TEXT;
-        `).catch(() => {});
-        
-        await sequelize.query(`
-          ALTER TABLE scans ADD COLUMN IF NOT EXISTS review_reaction_time INTEGER;
-        `).catch(() => {});
-        
-        logger.info('✅ Scan table schema updated');
-      } catch (e) {
-        // SQLite wirft Fehler wenn Spalten bereits existieren - das ist OK
+        logger.info('✅ Database schema updated');
       }
 
-      // Create default admin user
+      // Create Admin User
+      logger.info('Checking admin user...');
       const adminEmail = process.env.ADMIN_EMAIL;
       const adminPassword = process.env.ADMIN_PASSWORD;
 
@@ -224,6 +254,7 @@ async function startServer() {
           });
 
           if (!existingAdmin) {
+            logger.info('Creating new admin user...');
             const hashedPassword = await bcrypt.hash(adminPassword, 12);
             const admin = await User.create({
               email: adminEmail.toLowerCase().trim(),
@@ -235,26 +266,26 @@ async function startServer() {
               email_verified_at: new Date()
             });
             logger.info(`✅ Admin created: ${adminEmail}`);
-            
-            if (process.env.NODE_ENV === 'development') {
-              logger.info(`🔑 Admin password: ${adminPassword}`);
-            }
           } else {
-            logger.info(`ℹ️ Admin user already exists: ${adminEmail}`);
+            logger.info(`✅ Admin already exists: ${adminEmail}`);
+            
+            // Update last_review_count falls nötig
+            const restaurantCount = await Restaurant.count();
+            logger.info(`   Found ${restaurantCount} restaurants in database`);
           }
         } catch (adminError) {
-          logger.error('Admin creation error:', adminError);
+          logger.error('Admin user error:', adminError);
         }
       } else {
-        logger.warn('⚠️ Admin credentials nicht gesetzt - Admin wurde nicht erstellt');
-        if (process.env.NODE_ENV === 'production') {
-          logger.error('❌ KRITISCH: Admin muss in Production erstellt werden!');
-        }
+        logger.warn('⚠️ Admin credentials not set - skipping admin creation');
       }
 
-      // Create default plans if they don't exist
+      // Create Default Plans
+      logger.info('Checking default plans...');
       const planCount = await Plan.count();
+      
       if (planCount === 0) {
+        logger.info('Creating default plans...');
         await Plan.bulkCreate([
           {
             name: 'Trial',
@@ -285,84 +316,117 @@ async function startServer() {
           }
         ]);
         logger.info('✅ Default plans created');
+      } else {
+        logger.info(`✅ ${planCount} plans already exist`);
       }
       
+      // Database Statistics
+      const stats = {
+        users: await User.count(),
+        restaurants: await Restaurant.count(),
+        tables: await Table.count(),
+        qrcodes: await QRCode.count(),
+        scans: await Scan.count()
+      };
+      
+      console.log('\n📊 DATABASE STATISTICS:');
+      Object.entries(stats).forEach(([key, value]) => {
+        console.log(`   ${key}: ${value}`);
+      });
+      
     } catch (dbError) {
-      logger.error('Database initialization failed:', dbError);
+      logger.error('❌ Database initialization failed:', dbError);
+      logger.error('Stack trace:', dbError.stack);
       
       if (process.env.NODE_ENV === 'production') {
-        logger.error('❌ KRITISCH: Datenbank konnte nicht initialisiert werden!');
+        logger.error('❌ CRITICAL: Cannot continue without database!');
         process.exit(1);
-      } else {
-        throw dbError;
       }
     }
 
-    // API Routes with logging
+    // ===== API ROUTES =====
+    console.log('\n' + '='.repeat(60));
+    console.log('🔌 LOADING API ROUTES');
+    console.log('='.repeat(60));
+    
+    logger.info('Loading API routes...');
+    
     app.use('/api/admin', (req, res, next) => {
       logger.debug(`[ADMIN] ${req.method} ${req.path}`);
       next();
     }, require('./src/routes/admin'));
+    logger.info('   ✅ Admin routes loaded');
 
     app.use('/api/restaurant', (req, res, next) => {
       logger.debug(`[RESTAURANT] ${req.method} ${req.path}`);
       next();
     }, require('./src/routes/restaurant'));
+    logger.info('   ✅ Restaurant routes loaded');
 
     app.use('/api/public', (req, res, next) => {
       logger.debug(`[PUBLIC] ${req.method} ${req.path}`);
       next();
     }, require('./src/routes/public'));
+    logger.info('   ✅ Public routes loaded');
 
-    // Static files (if needed for uploaded files)
+    // Static files
     app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+    logger.info('   ✅ Static files configured');
 
-    // ===== START BACKGROUND SERVICES =====
+    // ===== BACKGROUND SERVICES =====
+    console.log('\n' + '='.repeat(60));
+    console.log('🔧 STARTING BACKGROUND SERVICES');
+    console.log('='.repeat(60));
     
-    // 1. Smart Review Notification Service (NEUER SERVICE!)
+    // Review Monitor Service
     try {
-      const smartReviewService = require('./src/services/smart-review-notification.service');
+      logger.info('Loading Review Monitor Service...');
+      const reviewMonitor = require('./src/services/review-monitor.service');
       
       if (process.env.GOOGLE_PLACES_API_KEY) {
-        smartReviewService.start();
-        logger.info('✅ Smart Review Monitoring gestartet (3 Min Verzögerung)');
-        logger.info('   ⏱️ E-Mails werden nur bei echten Reviews gesendet');
+        reviewMonitor.start();
+        logger.info('✅ Review Monitor Service started');
+        logger.info('   Check interval: 3 minutes');
+        logger.info('   Using last_review_count comparison');
       } else {
-        logger.warn('⚠️ Smart Review Monitoring deaktiviert - Google API Key fehlt');
-        logger.warn('   Setzen Sie GOOGLE_PLACES_API_KEY in den Environment Variables');
+        logger.warn('⚠️ Review Monitor disabled - Google API Key missing');
+        logger.warn('   Set GOOGLE_PLACES_API_KEY to enable');
       }
     } catch (serviceError) {
-      logger.error('Smart Review Service Error:', serviceError.message);
-      // Service optional - weiter mit Server-Start
+      logger.error('Review Monitor Error:', serviceError.message);
+      logger.error('   Service will be disabled');
     }
     
-    // 2. Keep-Alive Service (für Render Free Tier)
+    // Keep-Alive Service (for Render)
     if (process.env.NODE_ENV === 'production' && process.env.RENDER) {
       try {
+        logger.info('Loading Keep-Alive Service...');
         const keepAliveService = require('./src/services/keep-alive.service');
         keepAliveService.start();
-        logger.info('✅ Keep-Alive service started');
+        logger.info('✅ Keep-Alive service started (14 min interval)');
       } catch (serviceError) {
-        logger.warn('Keep-Alive service not available');
+        logger.warn('Keep-Alive service not available:', serviceError.message);
       }
     }
-    
-    // 3. Legacy Review Monitor (falls noch vorhanden - DEAKTIVIERT)
-    // Wir verwenden jetzt den Smart Review Service stattdessen
-    /*
+
+    // Email Service Check
     try {
-      const reviewMonitor = require('./src/services/review-monitor.service');
-      if (reviewMonitor && reviewMonitor.stop) {
-        reviewMonitor.stop(); // Stoppe alten Service
-        logger.info('⛔ Legacy Review Monitor gestoppt');
+      logger.info('Checking Email Service...');
+      const emailService = require('./src/services/email.service');
+      if (emailService.isConfigured) {
+        logger.info('✅ Email Service configured');
+      } else {
+        logger.warn('⚠️ Email Service not configured - check SMTP settings');
       }
     } catch (e) {
-      // Ignorieren wenn nicht vorhanden
+      logger.error('Email Service error:', e.message);
     }
-    */
 
+    // ===== ERROR HANDLERS =====
+    
     // 404 Handler
     app.use((req, res) => {
+      logger.warn(`404 Not Found: ${req.method} ${req.path}`);
       res.status(404).json({
         success: false,
         message: `Route not found: ${req.method} ${req.path}`,
@@ -392,70 +456,63 @@ async function startServer() {
       });
     });
 
-    // Start server
+    // ===== START SERVER =====
     const server = app.listen(PORT, '0.0.0.0', () => {
-      logger.info('='.repeat(60));
-      logger.info(`🚀 Server running on port ${PORT}`);
-      logger.info(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`🔗 Backend URL: ${process.env.BACKEND_URL || `http://localhost:${PORT}`}`);
-      logger.info(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      console.log('\n' + '='.repeat(60));
+      console.log('✅ SERVER SUCCESSFULLY STARTED');
+      console.log('='.repeat(60));
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🔗 Backend URL: ${process.env.BACKEND_URL || `http://localhost:${PORT}`}`);
+      console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      console.log('='.repeat(60));
       
-      // Zeige Service-Status
-      logger.info('📊 Active Services:');
-      if (process.env.GOOGLE_PLACES_API_KEY) {
-        logger.info('   ✅ Smart Review Monitoring (3 Min delay)');
-      } else {
-        logger.info('   ❌ Smart Review Monitoring (API Key missing)');
-      }
+      console.log('\n📊 SERVICE STATUS:');
+      console.log(`   Review Monitor: ${process.env.GOOGLE_PLACES_API_KEY ? '✅ Active' : '❌ Disabled'}`);
+      console.log(`   Email Service: ${process.env.SMTP_USER ? '✅ Configured' : '❌ Not configured'}`);
+      console.log(`   Keep-Alive: ${process.env.RENDER ? '✅ Active' : '⭕ Not needed'}`);
       
-      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-        logger.info('   ✅ Email Service');
-      } else {
-        logger.info('   ❌ Email Service (SMTP not configured)');
-      }
-      
-      if (warnings.length > 0) {
-        logger.warn(`⚠️ Warnings: ${warnings.length}`);
-        warnings.forEach(w => logger.warn(`   - ${w}`));
-      }
-      
-      logger.info('='.repeat(60));
+      console.log('\n🔍 MONITORING:');
+      console.log(`   Health Check: ${process.env.BACKEND_URL || `http://localhost:${PORT}`}/health`);
+      console.log(`   Logs: Check console output`);
+      console.log('='.repeat(60));
+      console.log('\n✅ READY TO ACCEPT REQUESTS\n');
     });
 
-    // Graceful Shutdown
+    // ===== GRACEFUL SHUTDOWN =====
     const gracefulShutdown = async (signal) => {
-      logger.info(`\n${signal} received, shutting down gracefully...`);
+      console.log('\n' + '='.repeat(60));
+      logger.info(`${signal} received, shutting down gracefully...`);
       
       server.close(() => {
         logger.info('HTTP server closed');
       });
       
       try {
-        // Stop Smart Review Service
-        const smartReviewService = require('./src/services/smart-review-notification.service');
-        if (smartReviewService && smartReviewService.stop) {
-          smartReviewService.stop();
-          logger.info('Smart Review Service stopped');
+        // Stop services
+        logger.info('Stopping background services...');
+        
+        const reviewMonitor = require('./src/services/review-monitor.service');
+        if (reviewMonitor && reviewMonitor.stop) {
+          reviewMonitor.stop();
+          logger.info('   Review Monitor stopped');
         }
         
-        // Stop other services
-        const services = ['keep-alive.service', 'review-monitor.service'];
-        for (const serviceName of services) {
-          try {
-            const service = require(`./src/services/${serviceName}`);
-            if (service && service.stop) {
-              service.stop();
-              logger.info(`${serviceName} stopped`);
-            }
-          } catch (e) {
-            // Service not available
-          }
+        const keepAliveService = require('./src/services/keep-alive.service');
+        if (keepAliveService && keepAliveService.stop) {
+          keepAliveService.stop();
+          logger.info('   Keep-Alive stopped');
         }
         
-        // Close database connection
+        // Close database
+        logger.info('Closing database connection...');
         const { sequelize } = require('./src/models');
         await sequelize.close();
-        logger.info('Database connections closed');
+        logger.info('   Database connection closed');
+        
+        console.log('='.repeat(60));
+        console.log('👋 SHUTDOWN COMPLETE');
+        console.log('='.repeat(60));
         
       } catch (error) {
         logger.error('Shutdown error:', error);
@@ -467,36 +524,25 @@ async function startServer() {
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     process.on('uncaughtException', (error) => {
-      logger.error('Uncaught Exception:', error);
+      logger.error('❌ UNCAUGHT EXCEPTION:', error);
       gracefulShutdown('UNCAUGHT_EXCEPTION');
     });
     process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      logger.error('❌ UNHANDLED REJECTION at:', promise, 'reason:', reason);
     });
 
   } catch (error) {
-    logger.error('Failed to start server:', error);
-    
-    if (process.env.NODE_ENV === 'production') {
-      // Minimal fallback server
-      app.get('*', (req, res) => {
-        res.status(500).json({ 
-          success: false, 
-          message: 'Server initialization failed' 
-        });
-      });
-      
-      app.listen(PORT, () => {
-        logger.error(`Fallback server on port ${PORT}`);
-      });
-    } else {
-      process.exit(1);
-    }
+    console.log('\n' + '='.repeat(60));
+    logger.error('❌ FATAL: Server startup failed:', error);
+    logger.error('Stack trace:', error.stack);
+    console.log('='.repeat(60));
+    process.exit(1);
   }
 }
 
-// Start the server
+// ===== START THE SERVER =====
+console.log('🚀 Initiating server startup...\n');
 startServer().catch(error => {
-  logger.error('Server startup failed:', error);
+  console.error('❌ FATAL ERROR:', error);
   process.exit(1);
 });
