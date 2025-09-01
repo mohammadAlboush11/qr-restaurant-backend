@@ -111,10 +111,35 @@ class ReviewMonitorService {
   }
 
   // Registriere einen Scan zur Überwachung
-  registerScan(scanData) {
+  async registerScan(scanData) {
+    // WICHTIG: Place ID Validierung und Extraktion
+    let placeId = scanData.google_place_id;
+    
+    // Falls keine Place ID, versuche aus der URL zu extrahieren
+    if (!placeId && scanData.redirected_to) {
+      const match = scanData.redirected_to.match(/placeid=([^&]+)/);
+      if (match && match[1]) {
+        placeId = match[1];
+        console.log(`📍 Place ID aus Redirect-URL extrahiert: ${placeId}`);
+        
+        // Update Restaurant mit extrahierter Place ID
+        const { Restaurant } = require('../models');
+        await Restaurant.update(
+          { google_place_id: placeId },
+          { where: { id: scanData.restaurant_id } }
+        );
+      }
+    }
+    
+    if (!placeId) {
+      console.log(`⚠️ Keine Place ID für ${scanData.restaurant_name} - Review-Monitoring nicht möglich`);
+      return;
+    }
+    
     const key = `${scanData.restaurant_id}_${Date.now()}`;
     this.scanWaitList.set(key, {
       ...scanData,
+      google_place_id: placeId,
       timestamp: new Date(),
       checked: false
     });
@@ -122,7 +147,17 @@ class ReviewMonitorService {
     console.log(`📍 Scan registriert für Review-Überwachung:`);
     console.log(`   Restaurant: ${scanData.restaurant_name}`);
     console.log(`   Tisch: ${scanData.table_number}`);
+    console.log(`   Place ID: ${placeId}`);
+    console.log(`   E-Mail an: ${scanData.notification_email || scanData.restaurant_email}`);
     console.log(`   Zeit: ${new Date().toLocaleTimeString('de-DE')}`);
+    
+    // Initialisiere Review-Count für dieses Restaurant falls noch nicht vorhanden
+    const { Restaurant } = require('../models');
+    const restaurant = await Restaurant.findByPk(scanData.restaurant_id);
+    
+    if (restaurant && (restaurant.last_review_count === null || restaurant.last_review_count === 0)) {
+      await this.initializeReviewCountForRestaurant(restaurant.id, placeId);
+    }
     
     // Lösche alte Einträge (älter als 2 Stunden)
     const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
@@ -130,6 +165,45 @@ class ReviewMonitorService {
       if (new Date(v.timestamp).getTime() < twoHoursAgo) {
         this.scanWaitList.delete(k);
       }
+    }
+  }
+  
+  // Neue Hilfsfunktion: Initialisiere Review-Count für einzelnes Restaurant
+  async initializeReviewCountForRestaurant(restaurantId, placeId) {
+    try {
+      console.log(`📊 Initialisiere Review-Count für Restaurant ${restaurantId}`);
+      
+      const response = await axios.get(
+        'https://maps.googleapis.com/maps/api/place/details/json',
+        {
+          params: {
+            place_id: placeId,
+            fields: 'user_ratings_total,rating',
+            key: process.env.GOOGLE_PLACES_API_KEY,
+            language: 'de'
+          },
+          timeout: 10000
+        }
+      );
+
+      if (response.data.status === 'OK') {
+        const currentCount = response.data.result.user_ratings_total || 0;
+        
+        const { Restaurant } = require('../models');
+        await Restaurant.update(
+          {
+            last_review_count: currentCount,
+            last_review_check: new Date(),
+            current_rating: response.data.result.rating,
+            google_place_id: placeId
+          },
+          { where: { id: restaurantId } }
+        );
+        
+        console.log(`   ✅ Review-Count initialisiert: ${currentCount} Reviews`);
+      }
+    } catch (error) {
+      console.error(`   ❌ Fehler bei Review-Count Initialisierung:`, error.message);
     }
   }
 

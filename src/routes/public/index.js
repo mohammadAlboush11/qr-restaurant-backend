@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { QRCode, Scan, Table, Restaurant } = require('../../models');
 const { Op } = require('sequelize');
-const emailService = require('../../services/email.service');
+
+// WICHTIG: KEIN Import von emailService!
+// GELÖSCHT: const emailService = require('../../services/email.service');
 
 // Health check
 router.get('/health', (req, res) => {
@@ -13,7 +15,7 @@ router.get('/health', (req, res) => {
   });
 });
 
-// QR Code Scan Handler - VOLLSTÄNDIG KORRIGIERT
+// QR Code Scan Handler - OHNE E-MAIL-VERSAND
 router.get('/scan/:code', async (req, res) => {
   try {
     const { code } = req.params;
@@ -189,6 +191,7 @@ router.get('/scan/:code', async (req, res) => {
 
     // WICHTIG: URL-Konstruktion für Google Reviews
     let redirectUrl = '';
+    let extractedPlaceId = restaurant.google_place_id;
     
     // Priorität 1: Direkte Google Review URL
     if (restaurant.google_review_url) {
@@ -197,6 +200,15 @@ router.get('/scan/:code', async (req, res) => {
       // Stelle sicher, dass die URL gültig ist
       if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
         redirectUrl = 'https://' + redirectUrl;
+      }
+      
+      // WICHTIG: Extrahiere Place ID aus der URL falls nicht vorhanden
+      if (!extractedPlaceId && redirectUrl.includes('placeid=')) {
+        const match = redirectUrl.match(/placeid=([^&]+)/);
+        if (match && match[1]) {
+          extractedPlaceId = match[1];
+          console.log(`📍 Place ID aus URL extrahiert: ${extractedPlaceId}`);
+        }
       }
     } 
     // Priorität 2: Google Business URL (falls vorhanden)
@@ -223,13 +235,15 @@ router.get('/scan/:code', async (req, res) => {
 
     // Log scan BEVOR der Weiterleitung
     try {
-      await Scan.create({
+      const scan = await Scan.create({
         qr_code_id: qrCode.id,
         table_id: table.id,
         restaurant_id: restaurant.id,
         ip_address: ipAddress,
         user_agent: userAgent,
-        redirected_to: redirectUrl
+        redirected_to: redirectUrl,
+        processed: false,
+        resulted_in_review: false
       });
 
       // Update scan counters
@@ -239,23 +253,40 @@ router.get('/scan/:code', async (req, res) => {
       await table.update({ last_scan_at: new Date() });
 
       console.log(`✅ Scan #${qrCode.scan_count + 1} for ${restaurant.name} - Table ${table.table_number}`);
+      console.log('📝 KEINE E-Mail wird gesendet - nur Weiterleitung');
 
-      // Send email notification if configured
-      if (emailService && emailService.isConfigured) {
-        // Email senden aber nicht auf Response warten
-        emailService.sendScanNotification({
-          restaurant_name: restaurant.name,
-          restaurant_email: restaurant.notification_email || restaurant.email,
-          table_number: table.table_number,
-          table_description: table.description || '',
-          scan_time: new Date().toLocaleString('de-DE'),
-          ip_address: ipAddress,
-          user_agent: userAgent,
-          google_review_url: redirectUrl
-        }).catch(emailError => {
-          console.error('Email error:', emailError.message);
-        });
+      // WICHTIG: Registriere Scan für Review-Monitoring mit extrahierter Place ID
+      try {
+        const reviewMonitor = require('../../services/review-monitor.service');
+        if (reviewMonitor && reviewMonitor.registerScan) {
+          // Update Restaurant mit extrahierter Place ID falls nicht vorhanden
+          if (extractedPlaceId && !restaurant.google_place_id) {
+            await Restaurant.update(
+              { google_place_id: extractedPlaceId },
+              { where: { id: restaurant.id } }
+            );
+            console.log(`✅ Restaurant ${restaurant.name} mit Place ID aktualisiert: ${extractedPlaceId}`);
+          }
+          
+          reviewMonitor.registerScan({
+            scan_id: scan.id,
+            restaurant_id: restaurant.id,
+            restaurant_name: restaurant.name,
+            restaurant_email: restaurant.notification_email || restaurant.email,
+            table_number: table.table_number,
+            google_place_id: extractedPlaceId || restaurant.google_place_id,
+            notification_email: restaurant.notification_email || restaurant.email,
+            redirected_to: redirectUrl  // Füge die URL für Place ID Extraktion hinzu
+          });
+          console.log(`📍 Scan für Review-Monitoring registriert (Place ID: ${extractedPlaceId || restaurant.google_place_id})`);
+        }
+      } catch (e) {
+        console.log('⚠️ Review Monitor nicht verfügbar:', e.message);
       }
+
+      // GELÖSCHT: Der gesamte E-Mail-Block wurde entfernt!
+      // KEINE emailService.sendScanNotification mehr!
+      
     } catch (logError) {
       console.error('Error logging scan:', logError);
       // Weitermachen auch wenn Logging fehlschlägt
