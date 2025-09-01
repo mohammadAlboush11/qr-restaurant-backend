@@ -378,16 +378,17 @@ async function startServer() {
     console.log('🔧 STARTING BACKGROUND SERVICES');
     console.log('='.repeat(60));
     
-    // Review Monitor Service
+    // NUR Review Monitor Service - KEINE anderen Services!
     try {
       logger.info('Loading Review Monitor Service...');
       const reviewMonitor = require('./src/services/review-monitor.service');
       
       if (process.env.GOOGLE_PLACES_API_KEY) {
-        reviewMonitor.start();
+        await reviewMonitor.start();
         logger.info('✅ Review Monitor Service started');
-        logger.info('   Check interval: 3 minutes');
-        logger.info('   Using last_review_count comparison');
+        logger.info('   Check interval: 2 minutes');
+        logger.info('   E-Mails: NUR bei neuen Google-Bewertungen');
+        logger.info('   KEINE E-Mails bei QR-Code Scans!');
       } else {
         logger.warn('⚠️ Review Monitor disabled - Google API Key missing');
         logger.warn('   Set GOOGLE_PLACES_API_KEY to enable');
@@ -397,7 +398,13 @@ async function startServer() {
       logger.error('   Service will be disabled');
     }
     
-    // Keep-Alive Service (for Render)
+    // DEAKTIVIERT: Andere Services die E-Mails beim Scan senden
+    console.log('\n🚫 DEAKTIVIERTE SERVICES:');
+    console.log('   ❌ QR Code Service (sendete E-Mails beim Scan)');
+    console.log('   ❌ Scan Notification Service (sendete E-Mails beim Scan)');
+    console.log('   ❌ Smart Review Service (alternativer Service)');
+    
+    // Keep-Alive Service (für Render) - sendet KEINE E-Mails
     if (process.env.NODE_ENV === 'production' && process.env.RENDER) {
       try {
         logger.info('Loading Keep-Alive Service...');
@@ -409,19 +416,18 @@ async function startServer() {
       }
     }
 
-    // Email Service Check
+    // Email Service Check (nur für Status)
     try {
       logger.info('Checking Email Service...');
       const emailService = require('./src/services/email.service');
       if (emailService.isConfigured) {
-        logger.info('✅ Email Service configured');
+        logger.info('✅ Email Service configured (nur für Review-Benachrichtigungen)');
       } else {
         logger.warn('⚠️ Email Service not configured - check SMTP settings');
       }
     } catch (e) {
       logger.error('Email Service error:', e.message);
     }
-
     // ===== ERROR HANDLERS =====
     
     // 404 Handler
