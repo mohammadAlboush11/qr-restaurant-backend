@@ -1,7 +1,5 @@
-/**
- * Production-Ready Server
- * backend/server.js
- */
+// backend/server.js
+// AKTUALISIERTE VERSION MIT SMART REVIEW SERVICE
 
 require('dotenv').config();
 const express = require('express');
@@ -49,7 +47,12 @@ function validateSecurityConfig() {
 
   // SMTP Config Check
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    warnings.push('E-Mail-Service nicht konfiguriert - Benachrichtigungen deaktiviert');
+    warnings.push('E-Mail-Service nicht konfiguriert - Review-Benachrichtigungen eingeschränkt');
+  }
+  
+  // Google API Check
+  if (!process.env.GOOGLE_PLACES_API_KEY) {
+    warnings.push('Google Places API Key fehlt - Automatische Review-Erkennung deaktiviert');
   }
 
   return { warnings, errors };
@@ -130,60 +133,92 @@ async function startServer() {
       });
     }
 
-    // Health Check (Public)
+    // Health Check mit Database Info
     app.get('/health', (req, res) => {
+      const { sequelize } = require('./src/models');
+      const dbPath = sequelize.databasePath || sequelize.config.storage;
+      const dbExists = fs.existsSync(dbPath);
+      const dbStats = dbExists ? fs.statSync(dbPath) : null;
+      
       res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         uptime: process.uptime(),
+        database: {
+          exists: dbExists,
+          path: dbPath,
+          size: dbStats ? `${(dbStats.size / 1024 / 1024).toFixed(2)} MB` : 'N/A',
+          lastModified: dbStats ? dbStats.mtime.toISOString() : 'N/A'
+        },
+        services: {
+          email: !!process.env.SMTP_USER && !!process.env.SMTP_PASS,
+          googleApi: !!process.env.GOOGLE_PLACES_API_KEY,
+          smartReview: 'active'
+        },
         warnings: warnings.length > 0 ? warnings : undefined
       });
     });
 
     // Database Initialization
     try {
-      const { sequelize, User, Restaurant, Table, Plan, QRCode } = require('./src/models');
+      const { sequelize, User, Restaurant, Table, Plan, QRCode, Scan } = require('./src/models');
       
       await sequelize.authenticate();
       logger.info('✅ Database connection established');
       
-      // Database path from ENV or default
-      const dbPath = process.env.DATABASE_PATH 
-        ? path.resolve(process.env.DATABASE_PATH)
-        : path.join(__dirname, 'database.sqlite');
-
+      // Get database path from sequelize config
+      const dbPath = sequelize.databasePath || sequelize.config.storage;
       logger.info(`📁 Database path: ${dbPath}`);
-
-      // Ensure directory exists
-      const dbDir = path.dirname(dbPath);
-      if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
-        logger.info(`📁 Created database directory: ${dbDir}`);
-      }
       
       const dbExists = fs.existsSync(dbPath);
       
       if (!dbExists) {
-        logger.info('Creating new database...');
+        logger.info('🆕 Creating new database...');
         await sequelize.sync({ force: true });
       } else {
-        logger.info('Using existing database...');
-        if (process.env.NODE_ENV === 'development') {
-          await sequelize.sync({ alter: true });
-        } else {
-          await sequelize.sync();
-        }
+        logger.info('✅ Using existing database');
+        const stats = fs.statSync(dbPath);
+        logger.info(`   Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+        logger.info(`   Last modified: ${stats.mtime.toISOString()}`);
+        
+        // Schema-Updates ohne Datenverlust
+        await sequelize.sync({ alter: true });
+      }
+      
+      // Füge neue Felder zum Scan Model hinzu (falls noch nicht vorhanden)
+      try {
+        await sequelize.query(`
+          ALTER TABLE scans ADD COLUMN IF NOT EXISTS processed BOOLEAN DEFAULT FALSE;
+        `).catch(() => {});
+        
+        await sequelize.query(`
+          ALTER TABLE scans ADD COLUMN IF NOT EXISTS processed_at DATETIME;
+        `).catch(() => {});
+        
+        await sequelize.query(`
+          ALTER TABLE scans ADD COLUMN IF NOT EXISTS resulted_in_review BOOLEAN DEFAULT FALSE;
+        `).catch(() => {});
+        
+        await sequelize.query(`
+          ALTER TABLE scans ADD COLUMN IF NOT EXISTS review_details TEXT;
+        `).catch(() => {});
+        
+        await sequelize.query(`
+          ALTER TABLE scans ADD COLUMN IF NOT EXISTS review_reaction_time INTEGER;
+        `).catch(() => {});
+        
+        logger.info('✅ Scan table schema updated');
+      } catch (e) {
+        // SQLite wirft Fehler wenn Spalten bereits existieren - das ist OK
       }
 
       // Create default admin user
       const adminEmail = process.env.ADMIN_EMAIL;
       const adminPassword = process.env.ADMIN_PASSWORD;
 
-      // Admin-Erstellung nur wenn beide Werte vorhanden
       if (adminEmail && adminPassword) {
         try {
-          // Prüfe ob Admin bereits existiert
           const existingAdmin = await User.findOne({
             where: { email: adminEmail.toLowerCase().trim() }
           });
@@ -201,7 +236,6 @@ async function startServer() {
             });
             logger.info(`✅ Admin created: ${adminEmail}`);
             
-            // Nur in Development das Passwort loggen
             if (process.env.NODE_ENV === 'development') {
               logger.info(`🔑 Admin password: ${adminPassword}`);
             }
@@ -257,46 +291,12 @@ async function startServer() {
       logger.error('Database initialization failed:', dbError);
       
       if (process.env.NODE_ENV === 'production') {
-        logger.warn('Starting server without database connection');
+        logger.error('❌ KRITISCH: Datenbank konnte nicht initialisiert werden!');
+        process.exit(1);
       } else {
         throw dbError;
       }
     }
-
-    // Debug-Route für Tests (nur Development)
-    if (process.env.NODE_ENV !== 'production') {
-      app.get('/api/debug/admin', async (req, res) => {
-        try {
-          const { User } = require('./src/models');
-          const admins = await User.findAll({
-            where: { role: ['admin', 'super_admin'] },
-            attributes: ['id', 'email', 'role', 'is_active', 'created_at']
-          });
-          res.json({ 
-            admins,
-            env_check: {
-              has_admin_email: !!process.env.ADMIN_EMAIL,
-              has_admin_password: !!process.env.ADMIN_PASSWORD,
-              has_jwt: !!process.env.JWT_SECRET
-            }
-          });
-        } catch (error) {
-          res.status(500).json({ error: error.message });
-        }
-      });
-    }
-
-    // JSON Parse Error Handler
-    app.use((err, req, res, next) => {
-      if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-        logger.error('Bad JSON:', err.message);
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid JSON in request body' 
-        });
-      }
-      next(err);
-    });
 
     // API Routes with logging
     app.use('/api/admin', (req, res, next) => {
@@ -317,8 +317,27 @@ async function startServer() {
     // Static files (if needed for uploaded files)
     app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-    // Start Background Services
-    if (process.env.NODE_ENV === 'production') {
+    // ===== START BACKGROUND SERVICES =====
+    
+    // 1. Smart Review Notification Service (NEUER SERVICE!)
+    try {
+      const smartReviewService = require('./src/services/smart-review-notification.service');
+      
+      if (process.env.GOOGLE_PLACES_API_KEY) {
+        smartReviewService.start();
+        logger.info('✅ Smart Review Monitoring gestartet (3 Min Verzögerung)');
+        logger.info('   ⏱️ E-Mails werden nur bei echten Reviews gesendet');
+      } else {
+        logger.warn('⚠️ Smart Review Monitoring deaktiviert - Google API Key fehlt');
+        logger.warn('   Setzen Sie GOOGLE_PLACES_API_KEY in den Environment Variables');
+      }
+    } catch (serviceError) {
+      logger.error('Smart Review Service Error:', serviceError.message);
+      // Service optional - weiter mit Server-Start
+    }
+    
+    // 2. Keep-Alive Service (für Render Free Tier)
+    if (process.env.NODE_ENV === 'production' && process.env.RENDER) {
       try {
         const keepAliveService = require('./src/services/keep-alive.service');
         keepAliveService.start();
@@ -326,17 +345,21 @@ async function startServer() {
       } catch (serviceError) {
         logger.warn('Keep-Alive service not available');
       }
-
-      try {
-        const reviewMonitor = require('./src/services/review-monitor.service');
-        if (process.env.GOOGLE_PLACES_API_KEY) {
-          reviewMonitor.start();
-          logger.info('✅ Review Monitor started');
-        }
-      } catch (serviceError) {
-        logger.warn('Review Monitor not available');
-      }
     }
+    
+    // 3. Legacy Review Monitor (falls noch vorhanden - DEAKTIVIERT)
+    // Wir verwenden jetzt den Smart Review Service stattdessen
+    /*
+    try {
+      const reviewMonitor = require('./src/services/review-monitor.service');
+      if (reviewMonitor && reviewMonitor.stop) {
+        reviewMonitor.stop(); // Stoppe alten Service
+        logger.info('⛔ Legacy Review Monitor gestoppt');
+      }
+    } catch (e) {
+      // Ignorieren wenn nicht vorhanden
+    }
+    */
 
     // 404 Handler
     app.use((req, res) => {
@@ -374,10 +397,28 @@ async function startServer() {
       logger.info('='.repeat(60));
       logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`🔗 URL: http://localhost:${PORT}`);
+      logger.info(`🔗 Backend URL: ${process.env.BACKEND_URL || `http://localhost:${PORT}`}`);
+      logger.info(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      
+      // Zeige Service-Status
+      logger.info('📊 Active Services:');
+      if (process.env.GOOGLE_PLACES_API_KEY) {
+        logger.info('   ✅ Smart Review Monitoring (3 Min delay)');
+      } else {
+        logger.info('   ❌ Smart Review Monitoring (API Key missing)');
+      }
+      
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        logger.info('   ✅ Email Service');
+      } else {
+        logger.info('   ❌ Email Service (SMTP not configured)');
+      }
+      
       if (warnings.length > 0) {
         logger.warn(`⚠️ Warnings: ${warnings.length}`);
+        warnings.forEach(w => logger.warn(`   - ${w}`));
       }
+      
       logger.info('='.repeat(60));
     });
 
@@ -390,7 +431,14 @@ async function startServer() {
       });
       
       try {
-        // Stop background services
+        // Stop Smart Review Service
+        const smartReviewService = require('./src/services/smart-review-notification.service');
+        if (smartReviewService && smartReviewService.stop) {
+          smartReviewService.stop();
+          logger.info('Smart Review Service stopped');
+        }
+        
+        // Stop other services
         const services = ['keep-alive.service', 'review-monitor.service'];
         for (const serviceName of services) {
           try {

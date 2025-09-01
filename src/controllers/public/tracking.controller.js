@@ -1,9 +1,11 @@
+// backend/src/controllers/public/tracking.controller.js
+// NEUE VERSION - KEINE SOFORTIGEN E-MAILS MEHR!
+
 const { QRCode, Scan, Table, Restaurant, ActivityLog } = require('../../models');
 const { Op } = require('sequelize');
-const emailService = require('../../services/email.service');
 
 class TrackingController {
-  // QR-Code Scan - Mit E-Mail-Benachrichtigung
+  // QR-Code Scan - OHNE sofortige E-Mail-Benachrichtigung
   async trackScan(req, res) {
     try {
       const { code } = req.params;
@@ -205,10 +207,29 @@ class TrackingController {
         `);
       }
       
-      // Google Review URL prüfen
-      const redirectUrl = restaurant.google_review_url || 
-                         restaurant.google_business_url ||
-                         `https://www.google.com/search?q=${encodeURIComponent(restaurant.name)}+reviews`;
+      // Google Review URL konstruieren
+      let redirectUrl = '';
+      
+      if (restaurant.google_review_url) {
+        redirectUrl = restaurant.google_review_url;
+        if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
+          redirectUrl = 'https://' + redirectUrl;
+        }
+      } else if (restaurant.google_place_id) {
+        // Direkt-Link zu Google Reviews mit Place ID
+        redirectUrl = `https://search.google.com/local/writereview?placeid=${restaurant.google_place_id}`;
+      } else if (restaurant.google_business_url) {
+        redirectUrl = restaurant.google_business_url;
+        if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
+          redirectUrl = 'https://' + redirectUrl;
+        }
+      } else {
+        // Fallback: Google-Suche
+        const searchQuery = encodeURIComponent(
+          `${restaurant.name} ${restaurant.address || ''} Bewertung schreiben`
+        );
+        redirectUrl = `https://www.google.com/search?q=${searchQuery}`;
+      }
       
       // Scan in Datenbank speichern
       const scan = await Scan.create({
@@ -217,7 +238,8 @@ class TrackingController {
         restaurant_id: restaurant.id,
         ip_address: ipAddress,
         user_agent: userAgent,
-        redirected_to: redirectUrl
+        redirected_to: redirectUrl,
+        processed: false // NEU: Markiere als unverarbeitet für Review-Check
       });
       
       // Scan-Zähler erhöhen
@@ -227,29 +249,36 @@ class TrackingController {
       await table.increment('scan_count');
       await table.update({ last_scan_at: new Date() });
       
-      console.log(`✅ Scan erfasst für Tisch ${table.table_number} in Restaurant ${restaurant.name}`);
+      console.log(`✅ Scan #${qrCode.scan_count + 1} für Tisch ${table.table_number} in Restaurant ${restaurant.name}`);
       
-      // E-MAIL SENDEN
+      // ⚡ WICHTIG: KEINE SOFORTIGE E-MAIL MEHR!
+      // Stattdessen: Registriere Scan für Review-Monitoring
       try {
-        if (emailService && emailService.sendScanNotification) {
-          const emailSent = await emailService.sendScanNotification({
+        const smartReviewService = require('../../services/smart-review-notification.service');
+        
+        if (smartReviewService && restaurant.google_place_id) {
+          await smartReviewService.registerScan({
+            scan_id: scan.id,
+            restaurant_id: restaurant.id,
+            table_id: table.id,
             restaurant_name: restaurant.name,
             restaurant_email: restaurant.notification_email || restaurant.email,
             table_number: table.table_number,
-            table_description: table.description || '',
-            scan_time: new Date().toLocaleString('de-DE'),
+            table_description: table.description,
+            scan_time: new Date(),
             ip_address: ipAddress,
             user_agent: userAgent,
-            google_review_url: redirectUrl
+            google_review_url: redirectUrl,
+            google_place_id: restaurant.google_place_id
           });
           
-          if (emailSent) {
-            console.log(`📧 E-Mail-Benachrichtigung gesendet an ${restaurant.notification_email || restaurant.email}`);
-          }
+          console.log(`📝 Scan für Review-Monitoring registriert (Check in 3 Minuten)`);
+        } else if (!restaurant.google_place_id) {
+          console.log(`⚠️ Kein Google Place ID - Review-Monitoring nicht möglich`);
         }
-      } catch (emailError) {
-        console.error('❌ E-Mail-Versand fehlgeschlagen:', emailError.message);
-        // Trotzdem weiterleiten, auch wenn E-Mail fehlschlägt
+      } catch (serviceError) {
+        console.error('❌ Fehler beim Registrieren für Review-Monitoring:', serviceError.message);
+        // Trotzdem weiterleiten
       }
       
       // Weiterleitung zu Google Reviews

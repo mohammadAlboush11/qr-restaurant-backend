@@ -1,3 +1,5 @@
+# render.yaml - KORRIGIERTE VERSION MIT PERSISTENTEM SPEICHER
+
 services:
   - type: web
     name: qr-restaurant-backend
@@ -5,10 +7,9 @@ services:
     buildCommand: |
       echo "Installing dependencies..." &&
       npm install &&
-      echo "Creating database directory..." &&
-      mkdir -p data &&
       echo "Build complete"
     startCommand: node server.js
+    
     envVars:
       # Server Configuration
       - key: NODE_ENV
@@ -18,40 +19,43 @@ services:
       - key: BACKEND_URL
         value: https://qr-restaurant-backend.onrender.com
         
-      # Database
+      # ⚠️ KRITISCH - ABSOLUTER PFAD FÜR PERSISTENTEN SPEICHER!
       - key: DATABASE_PATH
-        value: ./data/database.sqlite
+        value: /opt/render/project/src/data/database.sqlite
         
-      # JWT Secret - MUST BE CHANGED
+      # JWT Secret - Auto-generiert oder manuell setzen
       - key: JWT_SECRET
-        generateValue: true # Auto-generate secure value
+        generateValue: true # Oder manuell einen 32+ Zeichen String setzen
         
       # Frontend URL
       - key: FRONTEND_URL
         value: http://lt-express.de
         
-      # Admin Account - DEFAULT VALUES (Change in Dashboard)
+      # Admin Account - WICHTIG: In Render Dashboard setzen!
       - key: ADMIN_EMAIL
-        value: 
+        sync: false # Manuell in Dashboard setzen
       - key: ADMIN_PASSWORD
-        value: 
+        sync: false # Manuell in Dashboard setzen
         
-      # SMTP Configuration (Strato)
+      # SMTP Configuration (Strato) - In Dashboard setzen!
       - key: SMTP_HOST
         value: smtp.strato.de
       - key: SMTP_PORT
         value: "465"
       - key: SMTP_USER
-        sync: false # Set manually in dashboard
+        sync: false # Manuell in Dashboard setzen
       - key: SMTP_PASS
-        sync: false # Set manually in dashboard
+        sync: false # Manuell in Dashboard setzen
         
-      # Google Places API (Optional)
+      # Google Places API - WICHTIG für Review-Monitoring!
       - key: GOOGLE_PLACES_API_KEY
-        sync: false # Set manually if available
+        sync: false # Manuell in Dashboard setzen
         
-     
-    # Persistent disk for SQLite database
+      # Optional - Render Detection
+      - key: RENDER
+        value: true
+    
+    # PERSISTENT DISK - HIER WIRD DIE DATENBANK GESPEICHERT!
     disk:
       name: qr-restaurant-data
       mountPath: /opt/render/project/src/data
