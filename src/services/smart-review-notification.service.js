@@ -1,5 +1,5 @@
 // backend/src/services/smart-review-notification.service.js
-// NEUER SERVICE - E-MAILS NUR BEI ECHTEN REVIEWS (3 MIN VERZÖGERUNG)
+// ERWEITERTE VERSION MIT MEHR LOGGING UND DEBUGGING
 
 const axios = require('axios');
 const { Op } = require('sequelize');
@@ -10,9 +10,8 @@ class SmartReviewNotificationService {
     this.checkInterval = 2 * 60 * 1000; // Alle 2 Minuten prüfen
     this.intervalId = null;
     this.scanCache = new Map();
-    
-    // ⚡ HIER DIE WICHTIGE ÄNDERUNG - NUR 3 MINUTEN WARTEN!
-    this.reviewCheckDelay = 3 * 60 * 1000; // 3 Minuten statt 10!
+    this.reviewCheckDelay = 3 * 60 * 1000; // 3 Minuten warten
+    this.lastReviewCounts = new Map(); // Speichert letzte bekannte Review-Zahlen
   }
 
   async start() {
@@ -23,15 +22,24 @@ class SmartReviewNotificationService {
 
     if (!process.env.GOOGLE_PLACES_API_KEY) {
       console.warn('❌ Google Places API Key fehlt - Review Monitoring deaktiviert');
+      console.warn('   Setzen Sie GOOGLE_PLACES_API_KEY in den Environment Variables!');
       return;
     }
 
-    console.log('🔍 Starte intelligentes Review Monitoring...');
-    console.log('⏱️ E-Mail-Verzögerung: 3 Minuten');
+    console.log('='.repeat(60));
+    console.log('🔍 STARTE SMART REVIEW MONITORING SERVICE');
+    console.log('   ⏱️ E-Mail-Verzögerung: 3 Minuten');
+    console.log('   🔄 Check-Intervall: 2 Minuten');
+    console.log('   🔑 API Key: ' + (process.env.GOOGLE_PLACES_API_KEY ? '✅ Vorhanden' : '❌ Fehlt'));
+    console.log('='.repeat(60));
+    
     this.isMonitoring = true;
 
-    // Erste Prüfung nach 1 Minute
-    setTimeout(() => this.checkAllRestaurants(), 60000);
+    // Erste Prüfung nach 30 Sekunden
+    setTimeout(() => {
+      console.log('📊 Initiale Restaurant-Prüfung...');
+      this.checkAllRestaurants();
+    }, 30000);
 
     // Regelmäßige Prüfung alle 2 Minuten
     this.intervalId = setInterval(() => {
@@ -56,32 +64,91 @@ class SmartReviewNotificationService {
    */
   async registerScan(scanData) {
     const { 
+      scan_id,
       restaurant_id, 
       table_id, 
       restaurant_name, 
       table_number,
       scan_time,
       ip_address,
-      user_agent 
+      user_agent,
+      google_place_id,
+      notification_email
     } = scanData;
 
-    const scanKey = `${restaurant_id}_${Date.now()}`;
+    if (!google_place_id) {
+      console.log(`❌ Kann Scan nicht registrieren - Google Place ID fehlt für ${restaurant_name}`);
+      return;
+    }
+
+    const scanKey = `${restaurant_id}_${scan_id}_${Date.now()}`;
     
     this.scanCache.set(scanKey, {
       ...scanData,
       scan_time: scan_time || new Date(),
       check_after: new Date(Date.now() + this.reviewCheckDelay),
       attempts: 0,
-      max_attempts: 10 // Mehr Versuche bei kürzerer Zeit
+      max_attempts: 10
     });
 
-    console.log(`📝 Scan registriert für ${restaurant_name} - Tisch ${table_number}`);
-    console.log(`   ⏱️ Review-Check in 3 Minuten geplant`);
+    console.log('='.repeat(60));
+    console.log(`📝 SCAN REGISTRIERT FÜR REVIEW-MONITORING`);
+    console.log(`   Restaurant: ${restaurant_name}`);
+    console.log(`   Tisch: ${table_number}`);
+    console.log(`   Google Place ID: ${google_place_id}`);
+    console.log(`   E-Mail an: ${notification_email}`);
+    console.log(`   ⏱️ Erster Check in: 3 Minuten`);
+    console.log(`   Cache-Key: ${scanKey}`);
+    console.log(`   Aktuelle Cache-Größe: ${this.scanCache.size}`);
+    console.log('='.repeat(60));
+
+    // Initiale Review-Anzahl speichern falls noch nicht vorhanden
+    if (!this.lastReviewCounts.has(restaurant_id)) {
+      await this.getInitialReviewCount(restaurant_id, google_place_id);
+    }
 
     // Plane Review-Check nach 3 Minuten
     setTimeout(() => {
+      console.log(`⏰ Starte Review-Check für ${scanKey}`);
       this.checkForNewReview(scanKey);
     }, this.reviewCheckDelay);
+  }
+
+  /**
+   * Hole initiale Review-Anzahl
+   */
+  async getInitialReviewCount(restaurantId, placeId) {
+    try {
+      console.log(`📊 Hole initiale Review-Anzahl für Restaurant ${restaurantId}`);
+      
+      const response = await axios.get(
+        'https://maps.googleapis.com/maps/api/place/details/json',
+        {
+          params: {
+            place_id: placeId,
+            fields: 'user_ratings_total',
+            key: process.env.GOOGLE_PLACES_API_KEY,
+            language: 'de'
+          },
+          timeout: 10000
+        }
+      );
+
+      if (response.data.status === 'OK') {
+        const reviewCount = response.data.result.user_ratings_total || 0;
+        this.lastReviewCounts.set(restaurantId, reviewCount);
+        console.log(`   Aktuelle Review-Anzahl: ${reviewCount}`);
+        
+        // Update auch in Datenbank
+        const { Restaurant } = require('../models');
+        await Restaurant.update(
+          { last_review_count: reviewCount },
+          { where: { id: restaurantId } }
+        );
+      }
+    } catch (error) {
+      console.error(`❌ Fehler beim Abrufen der initialen Review-Anzahl:`, error.message);
+    }
   }
 
   /**
@@ -89,26 +156,24 @@ class SmartReviewNotificationService {
    */
   async checkForNewReview(scanKey) {
     const scanData = this.scanCache.get(scanKey);
-    if (!scanData) return;
+    if (!scanData) {
+      console.log(`⚠️ Scan ${scanKey} nicht mehr im Cache`);
+      return;
+    }
+
+    console.log('='.repeat(60));
+    console.log(`🔍 PRÜFE AUF NEUE REVIEW`);
+    console.log(`   Restaurant: ${scanData.restaurant_name}`);
+    console.log(`   Versuch: ${scanData.attempts + 1}/${scanData.max_attempts}`);
+    console.log(`   Place ID: ${scanData.google_place_id}`);
 
     try {
-      const { Restaurant } = require('../models');
-      const restaurant = await Restaurant.findByPk(scanData.restaurant_id);
-      
-      if (!restaurant || !restaurant.google_place_id) {
-        console.log(`⚠️ Restaurant ohne Google Place ID - überspringe`);
-        this.scanCache.delete(scanKey);
-        return;
-      }
-
-      console.log(`🔍 Prüfe Reviews für ${restaurant.name}...`);
-
-      // Hole aktuelle Reviews von Google
+      // Google Places API aufrufen
       const response = await axios.get(
         'https://maps.googleapis.com/maps/api/place/details/json',
         {
           params: {
-            place_id: restaurant.google_place_id,
+            place_id: scanData.google_place_id,
             fields: 'reviews,rating,user_ratings_total',
             key: process.env.GOOGLE_PLACES_API_KEY,
             language: 'de'
@@ -117,25 +182,39 @@ class SmartReviewNotificationService {
         }
       );
 
+      console.log(`   API Response Status: ${response.data.status}`);
+
       if (response.data.status !== 'OK') {
         throw new Error(`Google API Error: ${response.data.status}`);
       }
 
       const placeDetails = response.data.result;
       const currentReviewCount = placeDetails.user_ratings_total || 0;
-      const lastKnownCount = restaurant.last_review_count || 0;
+      const lastKnownCount = this.lastReviewCounts.get(scanData.restaurant_id) || 0;
+
+      console.log(`   Letzte bekannte Reviews: ${lastKnownCount}`);
+      console.log(`   Aktuelle Reviews: ${currentReviewCount}`);
+      console.log(`   Differenz: ${currentReviewCount - lastKnownCount}`);
 
       // Prüfe ob neue Review vorhanden
       if (currentReviewCount > lastKnownCount) {
-        console.log(`✅ NEUE BEWERTUNG gefunden für ${restaurant.name}!`);
-        console.log(`   Vorher: ${lastKnownCount} Reviews`);
-        console.log(`   Jetzt: ${currentReviewCount} Reviews`);
+        console.log(`✅ NEUE BEWERTUNG GEFUNDEN!`);
+        console.log(`   ${currentReviewCount - lastKnownCount} neue Review(s)`);
+        
+        // Update gespeicherte Anzahl
+        this.lastReviewCounts.set(scanData.restaurant_id, currentReviewCount);
         
         // Finde die neueste Review
         const latestReview = placeDetails.reviews?.[0];
+        if (latestReview) {
+          console.log(`   Autor: ${latestReview.author_name}`);
+          console.log(`   Rating: ${latestReview.rating} Sterne`);
+          console.log(`   Text: ${latestReview.text?.substring(0, 100) || 'Kein Text'}`);
+        }
         
         // Berechne Reaktionszeit
         const reactionTime = Math.round((Date.now() - new Date(scanData.scan_time).getTime()) / 60000);
+        console.log(`   Reaktionszeit: ${reactionTime} Minuten`);
         
         // Sende E-Mail mit Review-Details
         await this.sendReviewNotificationEmail({
@@ -150,86 +229,102 @@ class SmartReviewNotificationService {
           reaction_time_minutes: reactionTime
         });
 
-        // Update Restaurant
-        await restaurant.update({
-          last_review_count: currentReviewCount,
-          last_review_check: new Date(),
-          current_rating: placeDetails.rating
-        });
+        // Update Restaurant in Datenbank
+        const { Restaurant, Scan } = require('../models');
+        
+        await Restaurant.update(
+          {
+            last_review_count: currentReviewCount,
+            last_review_check: new Date(),
+            current_rating: placeDetails.rating
+          },
+          { where: { id: scanData.restaurant_id } }
+        );
 
-        // Scan als erfolgreich markieren
+        // Markiere Scan als verarbeitet
         if (scanData.scan_id) {
-          const { Scan } = require('../models');
-          const scan = await Scan.findByPk(scanData.scan_id);
-          if (scan) {
-            await scan.update({
+          await Scan.update(
+            {
               processed: true,
               processed_at: new Date(),
               resulted_in_review: true,
-              review_details: {
+              review_details: JSON.stringify({
                 author: latestReview?.author_name,
                 rating: latestReview?.rating,
                 text: latestReview?.text
-              }
-            });
-          }
+              }),
+              review_reaction_time: reactionTime
+            },
+            { where: { id: scanData.scan_id } }
+          );
         }
 
         // Aus Cache entfernen
         this.scanCache.delete(scanKey);
+        console.log(`✅ Scan ${scanKey} erfolgreich verarbeitet und aus Cache entfernt`);
+        console.log('='.repeat(60));
         
       } else {
         // Keine neue Review gefunden
         scanData.attempts++;
+        console.log(`❌ Keine neue Review gefunden`);
         
         if (scanData.attempts < scanData.max_attempts) {
-          // Versuche es später nochmal - alle 2 Minuten
-          console.log(`🔄 Keine neue Review - Versuch ${scanData.attempts}/${scanData.max_attempts}`);
+          // Versuche es später nochmal
+          const nextCheckIn = 2; // Minuten
+          console.log(`   Nächster Check in ${nextCheckIn} Minuten`);
+          console.log('='.repeat(60));
           
           setTimeout(() => {
             this.checkForNewReview(scanKey);
-          }, 2 * 60 * 1000); // Nächster Check in 2 Minuten
+          }, nextCheckIn * 60 * 1000);
           
         } else {
-          // Maximum erreicht (nach ~20 Minuten aufgeben)
-          console.log(`⏱️ Keine Review nach ${scanData.max_attempts} Versuchen`);
+          // Maximum erreicht
+          console.log(`⏱️ Maximum erreicht - gebe auf nach ${scanData.attempts} Versuchen`);
           
           // Optional: Info-Email senden
-          await this.sendNoReviewNotificationEmail({
-            ...scanData,
-            review_found: false,
-            message: 'Der Gast hat nach dem Scan keine Bewertung hinterlassen.',
-            total_wait_time: scanData.attempts * 2
-          });
+          if (scanData.attempts >= 5) { // Nur wenn mindestens 5 Versuche
+            await this.sendNoReviewNotificationEmail({
+              ...scanData,
+              review_found: false,
+              total_wait_time: scanData.attempts * 2
+            });
+          }
           
-          // Scan als verarbeitet markieren
+          // Markiere Scan als verarbeitet (ohne Review)
           if (scanData.scan_id) {
             const { Scan } = require('../models');
-            const scan = await Scan.findByPk(scanData.scan_id);
-            if (scan) {
-              await scan.update({
+            await Scan.update(
+              {
                 processed: true,
                 processed_at: new Date(),
-                resulted_in_review: false
-              });
-            }
+                resulted_in_review: false,
+                check_attempts: scanData.attempts
+              },
+              { where: { id: scanData.scan_id } }
+            );
           }
           
           this.scanCache.delete(scanKey);
+          console.log(`❌ Scan ${scanKey} ohne Review aus Cache entfernt`);
+          console.log('='.repeat(60));
         }
       }
       
     } catch (error) {
-      console.error(`❌ Review-Check Fehler für ${scanKey}:`, error.message);
+      console.error(`❌ Review-Check Fehler:`, error.message);
+      console.error(`   Details:`, error.response?.data || error);
       
-      // Bei Fehler: Versuche es später nochmal oder lösche
-      const scanData = this.scanCache.get(scanKey);
-      if (scanData && scanData.attempts < 3) {
-        scanData.attempts++;
+      // Bei Fehler: Versuche es später nochmal
+      scanData.attempts++;
+      if (scanData.attempts < 3) { // Bei Fehlern nur 3 Versuche
         setTimeout(() => this.checkForNewReview(scanKey), 5 * 60 * 1000);
       } else {
         this.scanCache.delete(scanKey);
+        console.log(`❌ Scan ${scanKey} nach Fehler aus Cache entfernt`);
       }
+      console.log('='.repeat(60));
     }
   }
 
@@ -237,105 +332,109 @@ class SmartReviewNotificationService {
    * Sende E-Mail wenn Review gefunden wurde
    */
   async sendReviewNotificationEmail(data) {
-    const emailService = require('./email.service');
+    console.log('📧 SENDE REVIEW-BENACHRICHTIGUNG');
+    console.log(`   An: ${data.notification_email || data.restaurant_email}`);
+    console.log(`   Review: ${data.review_rating} Sterne von ${data.review_author}`);
     
-    if (!emailService.isConfigured) {
-      console.warn('❌ E-Mail Service nicht konfiguriert');
-      return;
-    }
-
-    const emailContent = {
-      to: data.restaurant_email || data.notification_email,
-      subject: `🌟 Neue ${data.review_rating}-Sterne Bewertung erhalten!`,
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <style>
-            body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
-            .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
-            .content { padding: 30px; }
-            .success-box { background: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0; }
-            .review-box { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea; }
-            .rating { color: #ffc107; font-size: 24px; margin: 10px 0; }
-            .timeline { background: #e7f5ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
-            .stats { display: flex; justify-content: space-around; margin: 20px 0; }
-            .stat-box { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; flex: 1; margin: 0 10px; }
-            .stat-number { font-size: 28px; font-weight: bold; color: #667eea; }
-            .stat-label { color: #666; font-size: 14px; margin-top: 5px; }
-            .button { display: inline-block; background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-            .footer { text-align: center; padding: 20px; color: #666; font-size: 12px; background: #f8f9fa; }
-            .fast-response { background: #fff3cd; border: 1px solid #ffc107; padding: 10px; border-radius: 5px; margin: 15px 0; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>🎉 Neue Google-Bewertung erhalten!</h1>
-              <p style="margin: 0; font-size: 18px;">${data.restaurant_name}</p>
-            </div>
-            
-            <div class="content">
-              <div class="success-box">
-                <strong>✅ Erfolg!</strong> Ein Gast hat nach dem QR-Code Scan tatsächlich eine Bewertung hinterlassen!
-              </div>
-
-              <div class="fast-response">
-                <strong>⚡ Schnelle Reaktion!</strong><br>
-                Bewertung erfolgte nur ${data.reaction_time_minutes || 3} Minuten nach dem Scan!
-              </div>
-
-              <div class="timeline">
-                <strong>📱 Ablauf:</strong><br>
-                • Scan: Tisch ${data.table_number} um ${new Date(data.scan_time).toLocaleString('de-DE')}<br>
-                • Bewertung: ${data.review_rating} Sterne (nach ~${data.reaction_time_minutes || 3} Minuten)<br>
-                • Benachrichtigung: Jetzt (${new Date().toLocaleString('de-DE')})
-              </div>
-
-              <div class="review-box">
-                <h3>📝 Bewertungsdetails:</h3>
-                <div class="rating">${'⭐'.repeat(data.review_rating)}</div>
-                <p><strong>Von:</strong> ${data.review_author}</p>
-                ${data.review_text ? `<p><strong>Text:</strong> "${data.review_text}"</p>` : '<p><em>Keine schriftliche Bewertung hinterlassen</em></p>'}
-              </div>
-
-              <div class="stats">
-                <div class="stat-box">
-                  <div class="stat-number">${data.total_reviews}</div>
-                  <div class="stat-label">Gesamt-Bewertungen</div>
-                </div>
-                <div class="stat-box">
-                  <div class="stat-number">${data.average_rating ? data.average_rating.toFixed(1) : '0.0'}</div>
-                  <div class="stat-label">Durchschnitt</div>
-                </div>
-              </div>
-
-              <div style="text-align: center;">
-                <a href="${data.google_review_url || 'https://business.google.com'}" class="button">
-                  Alle Bewertungen ansehen →
-                </a>
-              </div>
-
-              <div style="background: #e7f5ff; padding: 15px; border-radius: 5px; margin-top: 20px;">
-                <strong>💡 Tipp:</strong> Antworten Sie zeitnah auf die Bewertung, um Ihre Kundenbindung zu stärken!
-              </div>
-            </div>
-
-            <div class="footer">
-              <p>Diese Benachrichtigung wurde automatisch vom QR Restaurant System generiert.</p>
-              <p>© ${new Date().getFullYear()} QR Restaurant System. Alle Rechte vorbehalten.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    };
-
     try {
+      const emailService = require('./email.service');
+      
+      if (!emailService.isConfigured) {
+        console.warn('❌ E-Mail Service nicht konfiguriert');
+        return;
+      }
+
+      const emailContent = {
+        to: data.notification_email || data.restaurant_email,
+        subject: `🌟 Neue ${data.review_rating}-Sterne Bewertung erhalten!`,
+        html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+              .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+              .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
+              .content { padding: 30px; }
+              .success-box { background: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0; }
+              .review-box { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea; }
+              .rating { color: #ffc107; font-size: 24px; margin: 10px 0; }
+              .timeline { background: #e7f5ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+              .stats { display: flex; justify-content: space-around; margin: 20px 0; }
+              .stat-box { text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; flex: 1; margin: 0 10px; }
+              .stat-number { font-size: 28px; font-weight: bold; color: #667eea; }
+              .stat-label { color: #666; font-size: 14px; margin-top: 5px; }
+              .button { display: inline-block; background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+              .footer { text-align: center; padding: 20px; color: #666; font-size: 12px; background: #f8f9fa; }
+              .fast-response { background: #fff3cd; border: 1px solid #ffc107; padding: 10px; border-radius: 5px; margin: 15px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>🎉 Neue Google-Bewertung erhalten!</h1>
+                <p style="margin: 0; font-size: 18px;">${data.restaurant_name}</p>
+              </div>
+              
+              <div class="content">
+                <div class="success-box">
+                  <strong>✅ Erfolg!</strong> Ein Gast hat nach dem QR-Code Scan (Tisch ${data.table_number}) tatsächlich eine Bewertung hinterlassen!
+                </div>
+
+                <div class="fast-response">
+                  <strong>⚡ Schnelle Reaktion!</strong><br>
+                  Die Bewertung erfolgte nur ${data.reaction_time_minutes || 3} Minuten nach dem Scan!
+                </div>
+
+                <div class="timeline">
+                  <strong>📱 Ablauf:</strong><br>
+                  • QR-Scan: Tisch ${data.table_number} um ${new Date(data.scan_time).toLocaleString('de-DE')}<br>
+                  • Bewertung: Nach ~${data.reaction_time_minutes || 3} Minuten<br>
+                  • Benachrichtigung: Jetzt
+                </div>
+
+                <div class="review-box">
+                  <h3>📝 Bewertungsdetails:</h3>
+                  <div class="rating">${'⭐'.repeat(Math.max(1, data.review_rating))}</div>
+                  <p><strong>Von:</strong> ${data.review_author}</p>
+                  ${data.review_text ? `<p><strong>Bewertungstext:</strong><br>"${data.review_text}"</p>` : '<p><em>Keine schriftliche Bewertung hinterlassen</em></p>'}
+                </div>
+
+                <div class="stats">
+                  <div class="stat-box">
+                    <div class="stat-number">${data.total_reviews}</div>
+                    <div class="stat-label">Gesamt-Bewertungen</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-number">${data.average_rating ? data.average_rating.toFixed(1) : '0.0'}</div>
+                    <div class="stat-label">Durchschnitt</div>
+                  </div>
+                </div>
+
+                <div style="text-align: center;">
+                  <a href="https://business.google.com" class="button">
+                    Jetzt auf Bewertung antworten →
+                  </a>
+                </div>
+
+                <div style="background: #e7f5ff; padding: 15px; border-radius: 5px; margin-top: 20px;">
+                  <strong>💡 Wichtig:</strong> Antworten Sie zeitnah auf die Bewertung! Das zeigt anderen Gästen, dass Sie Feedback ernst nehmen.
+                </div>
+              </div>
+
+              <div class="footer">
+                <p>QR Restaurant System - Automatische Review-Benachrichtigung</p>
+                <p>© ${new Date().getFullYear()} Alle Rechte vorbehalten.</p>
+              </div>
+            </div>
+          </body>
+          </html>
+        `
+      };
+
       await emailService.transporter.sendMail(emailContent);
-      console.log(`📧 Review-Benachrichtigung gesendet an ${emailContent.to}`);
+      console.log(`✅ Review-Benachrichtigung erfolgreich gesendet an ${emailContent.to}`);
     } catch (error) {
       console.error('❌ E-Mail-Versand fehlgeschlagen:', error);
     }
@@ -345,21 +444,11 @@ class SmartReviewNotificationService {
    * Sende Info-Email wenn keine Review erfolgte (optional)
    */
   async sendNoReviewNotificationEmail(data) {
-    // Optional - kann auch deaktiviert werden
-    const emailService = require('./email.service');
+    // Optional - kann deaktiviert werden wenn zu viele E-Mails
+    console.log(`📊 Optional: Info-E-Mail für Scan ohne Review (${data.restaurant_name})`);
     
-    if (!emailService.isConfigured) return;
-    
-    // Wenn Sie keine "Keine-Review" E-Mails möchten, kommentieren Sie den Rest aus
-    /*
-    const emailContent = {
-      to: data.restaurant_email || data.notification_email,
-      subject: `📊 QR-Scan ohne Bewertung - Tisch ${data.table_number}`,
-      // ... E-Mail Inhalt
-    };
-    
-    await emailService.transporter.sendMail(emailContent);
-    */
+    // Wenn Sie diese E-Mails nicht möchten, einfach return hier:
+    return; // DEAKTIVIERT - Keine E-Mails bei ausbleibenden Reviews
   }
 
   /**
@@ -372,14 +461,22 @@ class SmartReviewNotificationService {
         where: {
           is_active: true,
           google_place_id: { [Op.ne]: null }
-        }
+        },
+        attributes: ['id', 'name', 'google_place_id', 'last_review_count']
       });
 
-      console.log(`🔍 Prüfe ${restaurants.length} Restaurants auf neue Reviews...`);
-
-      for (const restaurant of restaurants) {
-        await this.checkRestaurantReviews(restaurant);
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Rate limiting
+      if (restaurants.length > 0) {
+        console.log(`🔍 Prüfe ${restaurants.length} Restaurants auf neue Reviews...`);
+        
+        for (const restaurant of restaurants) {
+          // Speichere letzte bekannte Anzahl falls noch nicht vorhanden
+          if (!this.lastReviewCounts.has(restaurant.id)) {
+            this.lastReviewCounts.set(restaurant.id, restaurant.last_review_count || 0);
+          }
+          
+          await this.checkRestaurantReviews(restaurant);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Rate limiting
+        }
       }
     } catch (error) {
       console.error('❌ Fehler beim Restaurant-Check:', error);
@@ -395,15 +492,18 @@ class SmartReviewNotificationService {
             place_id: restaurant.google_place_id,
             fields: 'rating,user_ratings_total',
             key: process.env.GOOGLE_PLACES_API_KEY
-          }
+          },
+          timeout: 5000
         }
       );
 
       if (response.data.status === 'OK') {
         const currentCount = response.data.result.user_ratings_total || 0;
-        const lastCount = restaurant.last_review_count || 0;
+        const lastCount = this.lastReviewCounts.get(restaurant.id) || restaurant.last_review_count || 0;
         
         if (currentCount !== lastCount) {
+          this.lastReviewCounts.set(restaurant.id, currentCount);
+          
           await restaurant.update({
             last_review_count: currentCount,
             last_review_check: new Date(),
@@ -411,12 +511,12 @@ class SmartReviewNotificationService {
           });
           
           if (currentCount > lastCount) {
-            console.log(`📈 ${restaurant.name}: ${currentCount - lastCount} neue Review(s)`);
+            console.log(`📈 ${restaurant.name}: ${currentCount - lastCount} neue Review(s) (Total: ${currentCount})`);
           }
         }
       }
     } catch (error) {
-      console.error(`Review-Check Error für ${restaurant.name}:`, error.message);
+      // Stille Fehlerbehandlung für Background-Check
     }
   }
 
@@ -425,6 +525,8 @@ class SmartReviewNotificationService {
    */
   async processPendingScans() {
     try {
+      console.log('📋 Prüfe auf ausstehende Scans...');
+      
       const { Scan, Restaurant, Table } = require('../models');
       
       // Hole unverarbeitete Scans der letzten 30 Minuten
@@ -465,10 +567,13 @@ class SmartReviewNotificationService {
               scan_time: scan.created_at,
               ip_address: scan.ip_address,
               user_agent: scan.user_agent,
-              google_place_id: scan.restaurant.google_place_id
+              google_place_id: scan.restaurant.google_place_id,
+              notification_email: scan.restaurant.notification_email || scan.restaurant.email
             });
           }
         }
+      } else {
+        console.log('📋 Keine ausstehenden Scans gefunden');
       }
     } catch (error) {
       console.error('❌ Fehler beim Laden ausstehender Scans:', error);
@@ -481,6 +586,7 @@ class SmartReviewNotificationService {
       checkInterval: this.checkInterval,
       reviewCheckDelay: this.reviewCheckDelay,
       pendingScans: this.scanCache.size,
+      cachedRestaurants: this.lastReviewCounts.size,
       apiKeyConfigured: !!process.env.GOOGLE_PLACES_API_KEY,
       settings: {
         waitTime: '3 Minuten',

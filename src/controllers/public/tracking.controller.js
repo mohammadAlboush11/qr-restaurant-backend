@@ -1,8 +1,11 @@
 // backend/src/controllers/public/tracking.controller.js
-// NEUE VERSION - KEINE SOFORTIGEN E-MAILS MEHR!
+// VOLLSTÄNDIG KORRIGIERTE VERSION - KEINE SOFORT-E-MAILS MEHR!
 
 const { QRCode, Scan, Table, Restaurant, ActivityLog } = require('../../models');
 const { Op } = require('sequelize');
+
+// WICHTIG: KEIN Import von emailService mehr!
+// const emailService = require('../../services/email.service'); // ENTFERNT!
 
 class TrackingController {
   // QR-Code Scan - OHNE sofortige E-Mail-Benachrichtigung
@@ -210,6 +213,8 @@ class TrackingController {
       // Google Review URL konstruieren
       let redirectUrl = '';
       
+      console.log(`🔍 Restaurant Google Place ID: ${restaurant.google_place_id}`);
+      
       if (restaurant.google_review_url) {
         redirectUrl = restaurant.google_review_url;
         if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
@@ -231,6 +236,8 @@ class TrackingController {
         redirectUrl = `https://www.google.com/search?q=${searchQuery}`;
       }
       
+      console.log(`🔄 Redirecting to: ${redirectUrl}`);
+      
       // Scan in Datenbank speichern
       const scan = await Scan.create({
         qr_code_id: qrCode.id,
@@ -239,7 +246,7 @@ class TrackingController {
         ip_address: ipAddress,
         user_agent: userAgent,
         redirected_to: redirectUrl,
-        processed: false // NEU: Markiere als unverarbeitet für Review-Check
+        processed: false // WICHTIG: Als unverarbeitet markieren
       });
       
       // Scan-Zähler erhöhen
@@ -249,12 +256,25 @@ class TrackingController {
       await table.increment('scan_count');
       await table.update({ last_scan_at: new Date() });
       
-      console.log(`✅ Scan #${qrCode.scan_count + 1} für Tisch ${table.table_number} in Restaurant ${restaurant.name}`);
+      console.log(`✅ Scan #${qrCode.scan_count + 1} für ${restaurant.name} - Tisch ${table.table_number}`);
       
-      // ⚡ WICHTIG: KEINE SOFORTIGE E-MAIL MEHR!
+      // ============================================================
+      // WICHTIG: KEINE SOFORTIGE E-MAIL MEHR!
       // Stattdessen: Registriere Scan für Review-Monitoring
+      // ============================================================
+      
+      // ENTFERNT: Der alte E-Mail Code ist komplett gelöscht!
+      // KEIN emailService.sendScanNotification mehr!
+      
+      // NEU: Smart Review Service für verzögerte E-Mail bei echter Review
       try {
-        const smartReviewService = require('../../services/smart-review-notification.service');
+        // Prüfe ob Smart Review Service verfügbar ist
+        let smartReviewService = null;
+        try {
+          smartReviewService = require('../../services/smart-review-notification.service');
+        } catch (e) {
+          console.log('⚠️ Smart Review Service nicht gefunden - verwende Fallback');
+        }
         
         if (smartReviewService && restaurant.google_place_id) {
           await smartReviewService.registerScan({
@@ -269,20 +289,26 @@ class TrackingController {
             ip_address: ipAddress,
             user_agent: userAgent,
             google_review_url: redirectUrl,
-            google_place_id: restaurant.google_place_id
+            google_place_id: restaurant.google_place_id,
+            notification_email: restaurant.notification_email || restaurant.email
           });
           
-          console.log(`📝 Scan für Review-Monitoring registriert (Check in 3 Minuten)`);
+          console.log(`📝 Scan registriert für Review-Monitoring`);
+          console.log(`   Restaurant: ${restaurant.name}`);
+          console.log(`   Google Place ID: ${restaurant.google_place_id}`);
+          console.log(`   E-Mail wird gesendet an: ${restaurant.notification_email || restaurant.email}`);
+          console.log(`   ⏱️ Review-Check in 3 Minuten`);
         } else if (!restaurant.google_place_id) {
-          console.log(`⚠️ Kein Google Place ID - Review-Monitoring nicht möglich`);
+          console.log(`⚠️ WARNUNG: Kein Google Place ID für ${restaurant.name}`);
+          console.log(`   Review-Monitoring nicht möglich ohne Google Place ID!`);
         }
       } catch (serviceError) {
         console.error('❌ Fehler beim Registrieren für Review-Monitoring:', serviceError.message);
-        // Trotzdem weiterleiten
+        // Trotzdem weiterleiten auch wenn Service-Fehler
       }
       
       // Weiterleitung zu Google Reviews
-      console.log(`🔄 Weiterleitung zu: ${redirectUrl}`);
+      console.log(`✅ Weiterleitung ohne E-Mail zu: ${redirectUrl}`);
       res.redirect(redirectUrl);
       
     } catch (error) {
@@ -373,7 +399,8 @@ class TrackingController {
         data: isValid ? {
           restaurant_name: qrCode.table.restaurant.name,
           table_number: qrCode.table.table_number,
-          subscription_status: qrCode.table.restaurant.subscription_status
+          subscription_status: qrCode.table.restaurant.subscription_status,
+          has_google_place_id: !!qrCode.table.restaurant.google_place_id
         } : null
       });
       
@@ -403,7 +430,7 @@ class TrackingController {
               {
                 model: Restaurant,
                 as: 'restaurant',
-                attributes: ['name']
+                attributes: ['name', 'google_place_id']
               }
             ]
           }
@@ -423,7 +450,8 @@ class TrackingController {
           restaurant: qrCode.table.restaurant.name,
           table: qrCode.table.table_number,
           total_scans: qrCode.scan_count,
-          last_scan: qrCode.last_scan_at
+          last_scan: qrCode.last_scan_at,
+          review_monitoring: !!qrCode.table.restaurant.google_place_id
         }
       });
       
